@@ -1,0 +1,18 @@
+{
+  "name": "classroom",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A full-stack classroom app for teachers and students.",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "helmet": "^8.1.0"
+  }
+}
