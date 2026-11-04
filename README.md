@@ -11,6 +11,8 @@ A full-stack classroom app for teacher and student accounts, class enrollment, a
 
 Create a teacher account, create a class, and share its 6-character class code. Students can create their own accounts and request to join a class with the code. The class owner must approve each request before the student can see classwork. Teachers can remove enrolled students or delete their classes; students can leave classes. Both roles can manage their name, email, and password in Settings. Teachers can post assignments, review submissions, and return grades and feedback; students see their own work and grades after signing in.
 
+After registration, each user receives a unique Classroom ID in the format `AA-45-BC`. Save this ID to sign in with your password; it is also available in Profile & settings. Email remains the account's contact address and is not used to sign in.
+
 ## Storage and deployment
 
 The server stores accounts, sessions, classes, assignments, submissions, and grades in `data/classroom.sqlite`. Set `DATA_DIRECTORY` to a persistent, private directory to store the database elsewhere. Back up the SQLite database regularly. Keep `NODE_ENV=production` when deploying behind HTTPS so session cookies are marked secure. Run the server as a single instance when using its SQLite database and in-memory request limiter.

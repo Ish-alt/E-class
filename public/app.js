@@ -48,6 +48,8 @@
     } else if (action === "open-settings") {
       state.view = "settings";
       renderDashboard();
+    } else if (action === "copy-account-id") {
+      copyAccountId(target.dataset.accountId);
     } else if (action === "approve-join" || action === "decline-join" || action === "remove-student" ||
       action === "delete-class" || action === "leave-class") {
       handleMembershipAction(target);
@@ -230,7 +232,8 @@
       (isRegister ? "Choose your role to get started with your classroom." : "Sign in to pick up where you left off.") + '</p>' +
       '<form data-auth-form data-mode="' + (isRegister ? "register" : "login") + '">' +
       (isRegister ? '<div class="form-field"><label for="auth-name">Your name</label><input id="auth-name" name="name" type="text" autocomplete="name" minlength="2" maxlength="80" required placeholder="e.g. Jamie Lee" /></div>' : "") +
-      '<div class="form-field"><label for="auth-email">Email address</label><input id="auth-email" name="email" type="email" autocomplete="email" maxlength="254" required placeholder="you@example.com" /></div>' +
+      (isRegister ? '<div class="form-field"><label for="auth-email">Email address</label><input id="auth-email" name="email" type="email" autocomplete="email" maxlength="254" required placeholder="you@example.com" /></div>' :
+        '<div class="form-field"><label for="auth-account-id">Classroom ID</label><input id="auth-account-id" name="accountId" type="text" autocomplete="username" maxlength="8" required placeholder="e.g. AA-45-BC" /></div>') +
       '<div class="form-field"><label for="auth-password">Password</label><input id="auth-password" name="password" type="password" autocomplete="' + (isRegister ? "new-password" : "current-password") +
       '" minlength="' + (isRegister ? "10" : "1") + '" maxlength="200" required placeholder="' + (isRegister ? "At least 10 characters" : "Enter your password") + '" /></div>' +
       (isRegister ? '<fieldset class="role-options"><legend>I’m joining as a...</legend><label class="role-option"><input type="radio" name="role" value="teacher" checked /><span class="role-option-icon">✎</span><span><strong>Teacher</strong><small>Create classes and assignments</small></span><span class="radio-dot"></span></label>' +
@@ -243,23 +246,30 @@
 
   async function handleAuth(form) {
     const submit = form.querySelector('[type="submit"]');
+    const isRegister = form.dataset.mode === "register";
     submit.disabled = true;
     try {
       const formData = new FormData(form);
       const body = {
-        email: formData.get("email"),
         password: formData.get("password"),
       };
-      if (form.dataset.mode === "register") {
+      if (isRegister) {
         body.name = formData.get("name");
+        body.email = formData.get("email");
         body.role = formData.get("role");
+      } else {
+        body.accountId = formData.get("accountId");
       }
       const result = await api("/api/auth/" + form.dataset.mode, { method: "POST", body });
       state.user = result.user;
       await loadDashboard();
       state.view = "home";
       showWorkspace();
-      showToast(form.dataset.mode === "register" ? "Welcome to Classroom, " + state.user.name + "!" : "Welcome back, " + state.user.name + ".");
+      if (isRegister) {
+        openAccountIdModal(state.user.id);
+      } else {
+        showToast("Welcome back, " + state.user.name + ".");
+      }
     } catch (error) {
       showToast(error.message, "error");
     } finally {
@@ -573,8 +583,11 @@
       '<section class="settings-card"><div class="settings-card-heading"><div class="avatar ' +
       (state.user.role === "teacher" ? "avatar-green" : "avatar-plum") + '">' + escapeHtml(getInitials(state.user.name)) +
       '</div><div><h2>' + escapeHtml(state.user.name) + '</h2><p>' + (state.user.role === "teacher" ? "Teacher account" : "Student account") + '</p></div></div>' +
+      '<div class="account-id-card"><div><span>Your Classroom ID</span><strong>' + escapeHtml(state.user.id) +
+      '</strong><small>Use this ID and your password to sign in.</small></div><button class="secondary-button" type="button" data-action="copy-account-id" data-account-id="' +
+      escapeHtml(state.user.id) + '">Copy ID</button></div>' +
       '<form class="settings-form" data-profile-form><div class="form-field"><label for="profile-name">Full name</label><input id="profile-name" name="name" value="' +
-      escapeHtml(state.user.name) + '" minlength="2" maxlength="80" required /></div><div class="form-field"><label for="profile-email">Email address</label>' +
+      escapeHtml(state.user.name) + '" minlength="2" maxlength="80" required /></div><div class="form-field"><label for="profile-email">Contact email</label>' +
       '<input id="profile-email" name="email" type="email" value="' + escapeHtml(state.user.email) + '" maxlength="254" required /></div>' +
       '<div class="settings-password-section"><h3>Change password</h3><p>Leave the new password blank to keep your current password.</p>' +
       '<div class="form-field"><label for="profile-current-password">Current password <span class="required-note">required to save changes</span></label>' +
@@ -654,6 +667,22 @@
       confirmationResolver = null;
       resolve(false);
     }
+  }
+
+  function openAccountIdModal(accountId) {
+    openModal("Your Classroom ID", "Save this ID. You’ll use it whenever you sign in.", '<div class="account-id-content">' +
+      '<div class="account-id-display"><span>Your ID</span><strong>' + escapeHtml(accountId) + '</strong></div>' +
+      '<button class="secondary-button account-id-copy" type="button" data-action="copy-account-id" data-account-id="' +
+      escapeHtml(accountId) + '">Copy ID</button><footer class="modal-footer"><button class="primary-button" type="button" data-close-modal>Continue to Classroom</button></footer></div>');
+    modalRoot.querySelector("button[data-close-modal]").focus();
+  }
+
+  function copyAccountId(accountId) {
+    navigator.clipboard.writeText(accountId).then(function () {
+      showToast("Classroom ID copied to your clipboard.");
+    }).catch(function () {
+      showToast("Copy failed. Select and copy the Classroom ID instead.", "error");
+    });
   }
 
   function finishConfirmation(confirmed) {

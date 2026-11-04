@@ -1,19 +1,24 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const { once } = require("node:events");
+const { DatabaseSync } = require("node:sqlite");
 const { after, before, test } = require("node:test");
 
+const legacySessionToken = "a".repeat(64);
 let server;
 let baseUrl;
 let temporaryDirectory;
 let teacherCookie;
 let studentCookie;
+let teacherAccountId;
+let studentAccountId;
 let classId;
 let assignmentId;
 let submissionId;
@@ -22,6 +27,7 @@ let joinRequestId;
 before(async function () {
   const port = await reservePort();
   temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "classroom-api-test-"));
+  seedLegacyDatabase();
   server = spawn(process.execPath, [path.join(__dirname, "..", "server.js")], {
     cwd: path.join(__dirname, ".."),
     env: Object.assign({}, process.env, {
@@ -53,16 +59,42 @@ test("serves the landing page without exposing project files", async function ()
   assert.equal(anonymousUser.body.user, null);
 });
 
+test("migrates existing account IDs and preserves linked records and sessions", async function () {
+  const legacyCookie = "classroom_session=" + legacySessionToken;
+  const me = await request("/api/auth/me", { cookie: legacyCookie });
+  assert.equal(me.response.status, 200);
+  assert.match(me.body.user.id, /^[A-Z]{2}-\d{2}-[A-Z]{2}$/);
+  assert.notEqual(me.body.user.id, "legacy-user-id");
+
+  const dashboard = await request("/api/dashboard", { cookie: legacyCookie });
+  assert.equal(dashboard.response.status, 200);
+  assert.equal(dashboard.body.classrooms[0].id, "legacy-class");
+  assert.match(dashboard.body.classrooms[0].students[0].id, /^[A-Z]{2}-\d{2}-[A-Z]{2}$/);
+  assert.equal(dashboard.body.classrooms[0].joinRequests[0].studentId, dashboard.body.classrooms[0].students[0].id);
+  assert.equal(dashboard.body.submissions[0].studentId, dashboard.body.classrooms[0].students[0].id);
+
+  const login = await request("/api/auth/login", {
+    method: "POST",
+    body: { accountId: me.body.user.id.toLowerCase(), password: "LegacyPass123" },
+  });
+  assert.equal(login.response.status, 200);
+});
+
 test("registers separate teacher and student accounts", async function () {
   const teacher = await register("Teacher One", "teacher@example.test", "TeacherPass123", "teacher");
   teacherCookie = teacher.cookie;
+  teacherAccountId = teacher.body.user.id;
   assert.equal(teacher.response.status, 201);
   assert.equal(teacher.body.user.role, "teacher");
+  assert.match(teacherAccountId, /^[A-Z]{2}-\d{2}-[A-Z]{2}$/);
 
   const student = await register("Student One", "student@example.test", "StudentPass123", "student");
   studentCookie = student.cookie;
+  studentAccountId = student.body.user.id;
   assert.equal(student.response.status, 201);
   assert.equal(student.body.user.role, "student");
+  assert.match(studentAccountId, /^[A-Z]{2}-\d{2}-[A-Z]{2}$/);
+  assert.notEqual(teacherAccountId, studentAccountId);
 
   const duplicate = await request("/api/auth/register", {
     method: "POST",
@@ -211,9 +243,14 @@ test("sessions expire on sign out and protected endpoints require authentication
 
   const loggedIn = await request("/api/auth/login", {
     method: "POST",
-    body: { email: "student@example.test", password: "StudentPass123" },
+    body: { accountId: studentAccountId, password: "StudentPass123" },
   });
   assert.equal(loggedIn.response.status, 200);
+  const emailLogin = await request("/api/auth/login", {
+    method: "POST",
+    body: { accountId: "student@example.test", password: "StudentPass123" },
+  });
+  assert.equal(emailLogin.response.status, 401);
   loggedIn.cookie = loggedIn.response.headers.get("set-cookie").split(";")[0];
   const logout = await request("/api/auth/logout", { method: "POST", cookie: loggedIn.cookie });
   assert.equal(logout.response.status, 204);
@@ -318,18 +355,19 @@ test("users can securely update their account profile and password", async funct
   assert.equal(updated.response.status, 200);
   assert.equal(updated.body.user.name, "Updated Teacher");
   assert.equal(updated.body.user.email, "updated.teacher@example.test");
+  assert.equal(updated.body.user.id, teacherAccountId);
 
-  const oldLogin = await request("/api/auth/login", {
+  const loginAfterEmailChange = await request("/api/auth/login", {
     method: "POST",
-    body: { email: "teacher@example.test", password: "TeacherPass123" },
+    body: { accountId: teacherAccountId, password: "TeacherPass123" },
   });
-  assert.equal(oldLogin.response.status, 401);
-  const newLogin = await request("/api/auth/login", {
+  assert.equal(loginAfterEmailChange.response.status, 401);
+  const loginAfterPasswordChange = await request("/api/auth/login", {
     method: "POST",
-    body: { email: "updated.teacher@example.test", password: "UpdatedPass123" },
+    body: { accountId: teacherAccountId, password: "UpdatedPass123" },
   });
-  assert.equal(newLogin.response.status, 200);
-  assert.equal(newLogin.body.user.role, "teacher");
+  assert.equal(loginAfterPasswordChange.response.status, 200);
+  assert.equal(loginAfterPasswordChange.body.user.role, "teacher");
 
   const duplicateEmail = await request("/api/auth/profile", {
     method: "PUT",
@@ -343,6 +381,106 @@ test("users can securely update their account profile and password", async funct
   });
   assert.equal(duplicateEmail.response.status, 409);
 });
+
+function seedLegacyDatabase() {
+  const database = new DatabaseSync(path.join(temporaryDirectory, "classroom.sqlite"));
+  database.exec(`
+    PRAGMA foreign_keys = ON;
+    CREATE TABLE users (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      role TEXT NOT NULL CHECK (role IN ('teacher', 'student')),
+      password_salt TEXT NOT NULL,
+      password_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE sessions (
+      token_hash TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      expires_at TEXT NOT NULL
+    );
+    CREATE TABLE classrooms (
+      id TEXT PRIMARY KEY,
+      teacher_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      subject TEXT NOT NULL,
+      join_code TEXT NOT NULL UNIQUE,
+      color TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE enrollments (
+      classroom_id TEXT NOT NULL REFERENCES classrooms(id) ON DELETE CASCADE,
+      student_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      joined_at TEXT NOT NULL,
+      PRIMARY KEY (classroom_id, student_id)
+    );
+    CREATE TABLE class_join_requests (
+      id TEXT PRIMARY KEY,
+      classroom_id TEXT NOT NULL REFERENCES classrooms(id) ON DELETE CASCADE,
+      student_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'declined')),
+      requested_at TEXT NOT NULL,
+      decided_at TEXT,
+      UNIQUE (classroom_id, student_id)
+    );
+    CREATE TABLE assignments (
+      id TEXT PRIMARY KEY,
+      classroom_id TEXT NOT NULL REFERENCES classrooms(id) ON DELETE CASCADE,
+      title TEXT NOT NULL,
+      instructions TEXT NOT NULL,
+      due_date TEXT NOT NULL,
+      points INTEGER NOT NULL CHECK (points BETWEEN 1 AND 1000),
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE submissions (
+      id TEXT PRIMARY KEY,
+      assignment_id TEXT NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
+      student_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      content TEXT NOT NULL,
+      submitted_at TEXT NOT NULL,
+      grade REAL,
+      feedback TEXT NOT NULL DEFAULT '',
+      graded_at TEXT,
+      UNIQUE (assignment_id, student_id)
+    );
+  `);
+  const legacyId = "legacy-user-id";
+  const legacyStudentId = "legacy-student-id";
+  const salt = Buffer.alloc(16, 1);
+  const passwordHash = crypto.scryptSync("LegacyPass123", salt, 64);
+  const insertUser = database.prepare(`
+    INSERT INTO users (id, name, email, role, password_salt, password_hash, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `);
+  insertUser.run(legacyId, "Legacy Teacher", "legacy@example.test", "teacher", salt.toString("hex"),
+    passwordHash.toString("hex"), new Date().toISOString());
+  insertUser.run(legacyStudentId, "Legacy Student", "legacy.student@example.test", "student", salt.toString("hex"),
+    passwordHash.toString("hex"), new Date().toISOString());
+  database.prepare("INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)")
+    .run(crypto.createHash("sha256").update(legacySessionToken).digest("hex"), legacyId,
+      new Date(Date.now() + 60 * 60 * 1000).toISOString());
+  database.prepare(`
+    INSERT INTO classrooms (id, teacher_id, name, subject, join_code, color, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run("legacy-class", legacyId, "Legacy Class", "History", "LEGACY", "lilac", new Date().toISOString());
+  database.prepare("INSERT INTO enrollments (classroom_id, student_id, joined_at) VALUES (?, ?, ?)")
+    .run("legacy-class", legacyStudentId, new Date().toISOString());
+  database.prepare(`
+    INSERT INTO class_join_requests (id, classroom_id, student_id, status, requested_at)
+    VALUES (?, ?, ?, ?, ?)
+  `).run("legacy-request", "legacy-class", legacyStudentId, "pending", new Date().toISOString());
+  database.prepare(`
+    INSERT INTO assignments (id, classroom_id, title, instructions, due_date, points, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run("legacy-assignment", "legacy-class", "Legacy Assignment", "", "2099-01-01", 10, new Date().toISOString());
+  database.prepare(`
+    INSERT INTO submissions (id, assignment_id, student_id, content, submitted_at, grade, feedback)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run("legacy-submission", "legacy-assignment", legacyStudentId, "Legacy work",
+    new Date().toISOString(), 8, "Good work.");
+  database.close();
+}
 
 async function register(name, email, password, role) {
   const result = await request("/api/auth/register", {

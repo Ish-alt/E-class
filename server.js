@@ -13,6 +13,7 @@ const isProduction = process.env.NODE_ENV === "production";
 const COOKIE_NAME = "classroom_session";
 const SESSION_DAYS = 14;
 const MAX_BODY_BYTES = 24 * 1024;
+const accountIdPattern = /^[A-Z]{2}-\d{2}-[A-Z]{2}$/;
 const dataDirectory = process.env.DATA_DIRECTORY || path.join(__dirname, "data");
 fs.mkdirSync(dataDirectory, { recursive: true });
 
@@ -85,6 +86,8 @@ database.exec(`
   CREATE INDEX IF NOT EXISTS submissions_assignment ON submissions(assignment_id);
 `);
 
+migrateUserIds();
+
 const colors = ["lilac", "mint", "peach", "sky"];
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const rateBuckets = new Map();
@@ -130,7 +133,7 @@ app.post("/api/auth/register", function (request, response, next) {
     const salt = crypto.randomBytes(16);
     const passwordHash = crypto.scryptSync(password, salt, 64);
     const user = {
-      id: crypto.randomUUID(),
+      id: generateAccountId((id) => Boolean(database.prepare("SELECT 1 FROM users WHERE id = ?").get(id))),
       name,
       email,
       role,
@@ -156,11 +159,11 @@ app.post("/api/auth/register", function (request, response, next) {
 
 app.post("/api/auth/login", function (request, response, next) {
   try {
-    const email = cleanText(request.body.email, 254).toLowerCase();
+    const accountId = cleanText(request.body.accountId, 8).toUpperCase();
     const password = typeof request.body.password === "string" ? request.body.password : "";
-    const user = database.prepare("SELECT * FROM users WHERE email = ?").get(email);
+    const user = database.prepare("SELECT * FROM users WHERE id = ?").get(accountId);
     if (!user || !verifyPassword(password, user.password_salt, user.password_hash)) {
-      throw httpError(401, "Email or password is incorrect.");
+      throw httpError(401, "Classroom ID or password is incorrect.");
     }
     createSession(response, user.id);
     response.json({ user: publicUser(user) });
@@ -683,6 +686,59 @@ function verifyPassword(password, saltHex, storedHashHex) {
 
 function publicUser(user) {
   return { id: user.id, name: user.name, email: user.email, role: user.role };
+}
+
+function migrateUserIds() {
+  const users = database.prepare("SELECT id FROM users").all();
+  const usedIds = new Set(users.map((user) => user.id));
+  const replacements = users
+    .filter((user) => !accountIdPattern.test(user.id))
+    .map((user) => {
+      const newId = generateAccountId((id) => usedIds.has(id));
+      usedIds.add(newId);
+      return [user.id, newId];
+    });
+  if (!replacements.length) return;
+
+  const userIdColumns = [
+    ["sessions", "user_id"],
+    ["classrooms", "teacher_id"],
+    ["enrollments", "student_id"],
+    ["class_join_requests", "student_id"],
+    ["submissions", "student_id"],
+  ];
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    database.exec("PRAGMA defer_foreign_keys = ON");
+    for (const [oldId, newId] of replacements) {
+      database.prepare("UPDATE users SET id = ? WHERE id = ?").run(newId, oldId);
+      for (const [table, column] of userIdColumns) {
+        database.prepare("UPDATE " + table + " SET " + column + " = ? WHERE " + column + " = ?").run(newId, oldId);
+      }
+    }
+    database.exec("COMMIT");
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function generateAccountId(isTaken) {
+  const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const id = randomLetters(letters, 2) + "-" +
+      String(crypto.randomInt(100)).padStart(2, "0") + "-" + randomLetters(letters, 2);
+    if (!isTaken(id)) return id;
+  }
+  throw new Error("Could not generate a unique Classroom ID.");
+}
+
+function randomLetters(alphabet, length) {
+  let result = "";
+  for (let index = 0; index < length; index += 1) {
+    result += alphabet[crypto.randomInt(alphabet.length)];
+  }
+  return result;
 }
 
 function getClassroomsForUser(user) {

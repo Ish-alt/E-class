@@ -3086,6 +3086,90 @@ button:disabled {
   }
 }
 
+.account-id-content {
+  display: grid;
+  justify-items: center;
+  gap: 16px;
+  padding: 24px;
+}
+
+.account-id-display {
+  display: grid;
+  width: 100%;
+  justify-items: center;
+  gap: 8px;
+  padding: 20px;
+  border: 1px solid #e8e2f5;
+  border-radius: 12px;
+  background: #f8f6fc;
+}
+
+.account-id-display span,
+.account-id-card span {
+  color: #777382;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.account-id-display strong {
+  color: var(--purple-dark);
+  font-family: Manrope, sans-serif;
+  font-size: 30px;
+  letter-spacing: 2px;
+}
+
+.account-id-content .modal-footer {
+  width: 100%;
+}
+
+.account-id-content .modal-footer .primary-button {
+  min-width: 170px;
+}
+
+.account-id-card {
+  display: flex;
+  max-width: 420px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+  padding: 14px 16px;
+  border: 1px solid #e8e2f5;
+  border-radius: 10px;
+  background: #f8f6fc;
+}
+
+.account-id-card > div {
+  display: grid;
+  gap: 4px;
+}
+
+.account-id-card strong {
+  color: var(--purple-dark);
+  font-family: Manrope, sans-serif;
+  font-size: 17px;
+  letter-spacing: 1px;
+}
+
+.account-id-card small {
+  color: #888593;
+  font-size: 11px;
+}
+
+.account-id-card .secondary-button {
+  flex: 0 0 auto;
+}
+
+@media (max-width: 560px) {
+  .account-id-display strong {
+    font-size: 26px;
+  }
+
+  .account-id-card {
+    align-items: flex-start;
+  }
+}
+
 .sidebar-label {
   font-size: 11px;
 }
