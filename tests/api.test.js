@@ -33,6 +33,8 @@ before(async function () {
     env: Object.assign({}, process.env, {
       PORT: String(port),
       DATA_DIRECTORY: temporaryDirectory,
+      NODE_ENV: "test",
+      DATABASE_URL: "",
     }),
     stdio: ["ignore", "pipe", "pipe"],
   });
