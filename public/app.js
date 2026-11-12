@@ -262,25 +262,158 @@
   }
 
   function renderLandingPage() {
-    return '<div class="landing-page"><nav class="landing-nav"><a class="brand" href="#" data-action="show-landing" aria-label="Classroom home">' +
-      brandMark() + '<span>classroom<span class="brand-period">.</span></span></a><div class="landing-nav-actions">' +
-      '<button class="text-button" type="button" data-action="show-auth" data-mode="login">Sign in</button>' +
-      '<button class="primary-button" type="button" data-action="show-auth" data-mode="register">Get started <span aria-hidden="true">→</span></button></div></nav>' +
-      '<main><section class="landing-hero"><div class="hero-copy"><div class="hero-kicker"><span class="hero-kicker-dot"></span> A calmer way to learn together</div>' +
-      '<h1>Bring your classroom<br />to <span>life.</span></h1><p>One welcoming place for teachers to share work and students to learn, grow, and get feedback.</p>' +
-      '<div class="hero-actions"><button class="primary-button hero-cta" type="button" data-action="show-auth" data-mode="register">Create your free account <span aria-hidden="true">→</span></button>' +
-      '<button class="secondary-button hero-signin" type="button" data-action="show-auth" data-mode="login">I already have an account</button></div>' +
-      '<div class="hero-proof"><div class="proof-avatars"><span>J</span><span>M</span><span>A</span><span>+</span></div><span>Made for teachers and learners</span></div></div>' +
-      '<div class="hero-art" aria-label="Illustration of a classroom"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div>' +
-      '<div class="art-sun">✦</div><div class="art-board"><div class="board-top"><span></span><span></span><span></span></div><div class="board-title">Today is a good day<br />to learn something new.</div>' +
-      '<div class="board-line"></div><div class="board-scribble">✳</div><div class="board-bottom"><span>♡</span><span>✿</span><span>↗</span></div></div>' +
-      '<div class="art-note note-left"><span class="note-icon">✎</span><span><strong>Thoughtful feedback</strong><small>Every step counts</small></span></div>' +
-      '<div class="art-note note-right"><span class="note-check">✓</span><span><strong>Assignment turned in</strong><small>Just now · Biology 101</small></span></div>' +
-      '<div class="art-flower flower-one">✿</div><div class="art-flower flower-two">✽</div></div></section>' +
-      '<section class="landing-features"><div><span class="feature-icon feature-purple">▦</span><h2>Your classes, together</h2><p>Teachers create a class. Students join with a simple class code.</p></div>' +
-      '<div><span class="feature-icon feature-green">↗</span><h2>Work that gets seen</h2><p>Turn in assignments and know your teacher has received them.</p></div>' +
-      '<div><span class="feature-icon feature-orange">♡</span><h2>Feedback that helps</h2><p>See your grade and your teacher’s notes, all in one place.</p></div></section></main>' +
-      '<footer class="landing-footer"><span>Made for curious minds <span class="footer-heart">♥</span></span><span>Classroom ' + new Date().getFullYear() + '</span></footer></div>';
+    return `<div class="landing-page landing-v2">
+      <nav class="landing-nav landing-v2-nav">
+        <a class="brand" href="#" data-action="show-landing" aria-label="Classroom home">
+          ${brandMark()}<span>classroom<span class="brand-period">.</span></span>
+        </a>
+        <div class="landing-nav-actions">
+          <button class="text-button" type="button" data-action="show-auth" data-mode="login">Sign in</button>
+          <button class="primary-button" type="button" data-action="show-auth" data-mode="register">Get started <span aria-hidden="true">→</span></button>
+        </div>
+      </nav>
+      <main>
+        <section class="landing-hero landing-v2-hero">
+          <div class="landing-visual landing-hero-visual" role="img" aria-label="Illustration of a teacher and students learning together">
+            <div class="learning-art" aria-hidden="true">
+              <span class="learning-orbit"></span>
+              <span class="learning-spark learning-spark-one">✦</span>
+              <span class="learning-spark learning-spark-two">✳</span>
+              <span class="learning-spark learning-spark-three">✦</span>
+              <div class="learning-person learning-student-left">
+                <svg viewBox="0 0 180 230" fill="none">
+                  <path d="M13 230c4-48 30-73 77-73s73 25 77 73H13Z" fill="#7860C8"/>
+                  <path d="M69 137h42v40H69z" fill="#A85F43"/>
+                  <path d="M43 83c0-34 19-59 48-59 30 0 48 24 48 59v31c0 31-20 54-48 54s-48-23-48-54V83Z" fill="#B96F4D"/>
+                  <path d="M38 95c-6-21-5-51 8-69C57 8 72 3 91 5c25 2 43 15 50 38 7 22 3 42 0 53-4-10-10-20-20-27-12-9-24-13-40-13-15 0-27 6-37 16-4 5-6 13-6 23Z" fill="#302A3C"/>
+                  <circle cx="64" cy="106" r="4" fill="#352A30"/><circle cx="115" cy="106" r="4" fill="#352A30"/>
+                  <path d="M75 132c9 8 20 8 29 0" stroke="#743D38" stroke-width="4" stroke-linecap="round"/>
+                  <path d="M41 78c-9 5-10 18-3 25M137 78c9 5 10 18 3 25" stroke="#302A3C" stroke-width="10" stroke-linecap="round"/>
+                  <path d="M57 190c18-12 45-12 64 0" stroke="#A895E1" stroke-width="5" stroke-linecap="round"/>
+                </svg>
+              </div>
+              <div class="learning-person learning-teacher">
+                <svg viewBox="0 0 210 280" fill="none">
+                  <path d="M16 280c3-57 34-88 89-88s86 31 89 88H16Z" fill="#4F987B"/>
+                  <path d="M83 146h44v49H83z" fill="#8D523A"/>
+                  <path d="M55 89c0-39 21-66 50-66s50 27 50 66v34c0 34-21 59-50 59s-50-25-50-59V89Z" fill="#A76546"/>
+                  <path d="M49 103c-11-34-4-73 22-91 22-16 60-10 78 13 14 18 14 48 7 77-5-22-17-37-35-45-24-11-51-5-72 16v30Z" fill="#292638"/>
+                  <path d="M64 46c-16 15-17 42-9 60M151 44c15 15 16 42 9 61" stroke="#292638" stroke-width="12" stroke-linecap="round"/>
+                  <circle cx="84" cy="111" r="4" fill="#382B2A"/><circle cx="127" cy="111" r="4" fill="#382B2A"/>
+                  <path d="M92 137c8 7 18 7 26 0" stroke="#714139" stroke-width="4" stroke-linecap="round"/>
+                  <rect x="69" y="101" width="32" height="22" rx="9" stroke="#43354A" stroke-width="4"/>
+                  <rect x="110" y="101" width="32" height="22" rx="9" stroke="#43354A" stroke-width="4"/>
+                  <path d="M101 110h9" stroke="#43354A" stroke-width="4"/>
+                  <path d="M37 218c17-17 36-25 57-25M173 218c-17-17-36-25-57-25" stroke="#A76546" stroke-width="15" stroke-linecap="round"/>
+                  <path d="M59 220c14-10 29-15 46-15s32 5 46 15v43H59v-43Z" fill="#FFFDF7"/>
+                  <path d="M105 207v56" stroke="#D8D2E8" stroke-width="3"/>
+                  <path d="m105 207-42 10v40l42 6 42-6v-40l-42-10Z" fill="#FAF8FF" stroke="#B9ACDE" stroke-width="3" stroke-linejoin="round"/>
+                  <path d="m69 223 30 5M69 233l30 5M141 223l-30 5M141 233l-30 5" stroke="#C9C0E3" stroke-width="2" stroke-linecap="round"/>
+                </svg>
+              </div>
+              <div class="learning-person learning-student-right">
+                <svg viewBox="0 0 180 230" fill="none">
+                  <path d="M13 230c4-48 30-73 77-73s73 25 77 73H13Z" fill="#E59B62"/>
+                  <path d="M69 137h42v40H69z" fill="#74442F"/>
+                  <path d="M42 84c0-34 20-59 48-59s48 25 48 59v30c0 32-20 55-48 55s-48-23-48-55V84Z" fill="#946046"/>
+                  <path d="M36 97C28 61 39 25 64 10c15-9 32-8 47 0 25 13 38 44 31 79-6-18-14-29-27-36-17-9-42-8-59 2-9 5-15 18-20 42Z" fill="#242332"/>
+                  <circle cx="64" cy="106" r="4" fill="#30252A"/><circle cx="115" cy="106" r="4" fill="#30252A"/>
+                  <path d="M75 131c9 6 19 6 28 0" stroke="#683A32" stroke-width="4" stroke-linecap="round"/>
+                  <circle cx="44" cy="48" r="10" fill="#242332"/><circle cx="136" cy="48" r="10" fill="#242332"/>
+                  <path d="M57 190c18-12 45-12 64 0" stroke="#F3C399" stroke-width="5" stroke-linecap="round"/>
+                </svg>
+              </div>
+            </div>
+          </div>
+          <div class="hero-copy landing-v2-copy">
+            <h1>Create your ideal<br /><span>learning environment.</span></h1>
+            <div class="hero-actions">
+              <button class="primary-button hero-cta" type="button" data-action="show-auth" data-mode="register">Create an account <span aria-hidden="true">→</span></button>
+              <button class="secondary-button hero-signin" type="button" data-action="show-auth" data-mode="login">Already have an account</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="landing-showcase" aria-label="Classroom features">
+          <article class="showcase-row">
+            <div class="showcase-copy">
+              <span class="showcase-number">01 / YOUR CLASS, AT A GLANCE</span>
+              <h2>Everything starts<br />with a classroom.</h2>
+              <p>Create a home for your class. Students request to join with a code, and you decide who gets in.</p>
+              <ul><li>One clear student roster</li><li>Teacher-approved enrollment</li><li>Class activity and history</li></ul>
+            </div>
+            <div class="landing-visual visual-roster" aria-label="Class roster preview">
+              <div class="visual-paper roster-paper">
+                <span class="visual-eyebrow">BIOLOGY 101 <span class="roster-count">18 STUDENTS</span></span>
+                <strong class="paper-heading">Your people, all here.</strong>
+                <div class="roster-person"><span class="roster-avatar avatar-one">AM</span><span><strong>Alex Morgan</strong><small>Joined this week</small></span><span class="roster-check">✓</span></div>
+                <div class="roster-person"><span class="roster-avatar avatar-two">JL</span><span><strong>Jordan Lee</strong><small>Joined this week</small></span><span class="roster-check">✓</span></div>
+                <div class="roster-person"><span class="roster-avatar avatar-three">SK</span><span><strong>Sam Kim</strong><small>Joined last week</small></span><span class="roster-check">✓</span></div>
+                <div class="roster-invite">CLASS CODE <strong>BC · 24 · QX</strong><span>Copy code ↗</span></div>
+              </div>
+            </div>
+          </article>
+
+          <article class="showcase-row showcase-reverse">
+            <div class="showcase-copy">
+              <span class="showcase-number">02 / WORK THAT MOVES FORWARD</span>
+              <h2>Give great work<br />a place to land.</h2>
+              <p>Post assignments, set the due date and accepted file types, then review each submission in one tidy inbox.</p>
+              <ul><li>PDF, DOCX, PPT, and more</li><li>Written or file submissions</li><li>Grades and personal feedback</li></ul>
+            </div>
+            <div class="landing-visual visual-submissions" aria-label="Assignment and grading preview">
+              <div class="submission-paper">
+                <span class="visual-eyebrow">ASSIGNMENT INBOX</span><strong class="paper-heading">Cell report</strong>
+                <div class="submission-progress"><span>CLASS PROGRESS</span><strong>14 <small>/ 18 turned in</small></strong><div><i></i></div></div>
+                <div class="submission-file"><span class="file-icon">PDF</span><span><strong>cell_report_final.pdf</strong><small>Alex Morgan · Just now</small></span><span class="file-arrow">↗</span></div>
+                <div class="submission-feedback"><span class="feedback-star">✦</span><span><strong>18 <small>/ 20 points</small></strong><small>“Clear, thoughtful explanation.”</small></span><span class="feedback-check">✓</span></div>
+              </div>
+            </div>
+          </article>
+
+          <article class="showcase-row">
+            <div class="showcase-copy">
+              <span class="showcase-number">03 / TEACH, SHARE, CHECK IN</span>
+              <h2>Make room for<br />every kind of lesson.</h2>
+              <p>Share books and class materials, or build a quiz with multiple-choice, true-or-false, and short-answer questions.</p>
+              <ul><li>Auto-graded objective questions</li><li>Teacher-reviewed short answers</li><li>Private class file sharing</li></ul>
+            </div>
+            <div class="landing-visual visual-lesson" aria-label="Quiz and class materials preview">
+              <div class="lesson-card">
+                <span class="lesson-tag">QUICK CHECK · 3 POINTS</span><strong class="paper-heading">Which organelle stores DNA?</strong>
+                <div class="lesson-option lesson-option-selected"><span>A</span><strong>The nucleus</strong><span>✓</span></div>
+                <div class="lesson-option"><span>B</span><strong>The ribosome</strong></div>
+                <div class="lesson-resource"><span class="resource-icon">↧</span><span><strong>Chapter 4 · Cell structure</strong><small>PDF · Shared by Ms. Rivera</small></span><span class="file-arrow">↗</span></div>
+              </div>
+            </div>
+          </article>
+
+          <article class="showcase-row showcase-reverse">
+            <div class="showcase-copy">
+              <span class="showcase-number">04 / BETTER TOGETHER</span>
+              <h2>Groups with a little<br />more thought.</h2>
+              <p>Make balanced groups at random, assign them yourself, or let teacher-approved student leaders bring a team together.</p>
+              <ul><li>Balanced random grouping</li><li>Manual student assignment</li><li>Teacher-selected group leaders</li></ul>
+            </div>
+            <div class="landing-visual visual-groups" aria-label="Student group preview">
+              <div class="group-paper">
+                <span class="visual-eyebrow">PROJECT TEAMS <span class="group-balanced">EVENLY BALANCED</span></span>
+                <strong class="paper-heading">A good mix makes a great team.</strong>
+                <div class="mini-group"><span class="mini-group-label">GROUP 01 <small>4 MEMBERS</small></span><div><i class="group-avatar group-a">AM</i><i class="group-avatar group-b">JL</i><i class="group-avatar group-c">SK</i><i class="group-avatar group-d">+</i></div></div>
+                <div class="mini-group"><span class="mini-group-label">GROUP 02 <small>4 MEMBERS</small></span><div><i class="group-avatar group-e">MR</i><i class="group-avatar group-f">ET</i><i class="group-avatar group-g">NK</i><i class="group-avatar group-d">+</i></div></div>
+                <div class="group-random"><span>✦</span> Random grouping is ready</div>
+              </div>
+            </div>
+          </article>
+        </section>
+
+        <section class="landing-final-cta">
+          <div><span class="showcase-number">A LITTLE MORE ROOM TO LEARN</span><h2>Bring your classroom together.</h2></div>
+          <button class="primary-button" type="button" data-action="show-auth" data-mode="register">Get started <span aria-hidden="true">→</span></button>
+        </section>
+      </main>
+      <footer class="landing-footer landing-v2-footer"><span>Made for curious minds <span class="footer-heart">♥</span></span><span>Classroom ${new Date().getFullYear()}</span></footer>
+    </div>`;
   }
 
   function renderAuthForm() {
