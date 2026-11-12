@@ -239,6 +239,126 @@ test("students submit work and only the owning teacher can grade it", async func
   assert.equal(stolenGrade.response.status, 404);
 });
 
+test("class detail provides roster and quiz answers are private and grade correctly", async function () {
+  const studentDetail = await request("/api/classrooms/" + classId + "/details", { cookie: studentCookie });
+  assert.equal(studentDetail.response.status, 200);
+  assert.equal(studentDetail.body.students.length, 1);
+  assert.equal("email" in studentDetail.body.students[0], false);
+  assert.equal(studentDetail.body.assignments.length, 1);
+
+  const teacherDetail = await request("/api/classrooms/" + classId + "/details", { cookie: teacherCookie });
+  assert.equal(teacherDetail.body.students[0].email, "student@example.test");
+
+  const dueDate = new Date(Date.now() + 86400000 * 10).toISOString().slice(0, 10);
+  const created = await request("/api/classrooms/" + classId + "/quizzes", {
+    method: "POST",
+    cookie: teacherCookie,
+    body: {
+      title: "Cell knowledge check",
+      description: "Answer every question.",
+      dueDate,
+      questions: [
+        { type: "multiple_choice", prompt: "Which organelle stores DNA?", options: ["Nucleus", "Ribosome"], answer: "Nucleus", points: 2 },
+        { type: "true_false", prompt: "Cells have membranes.", answer: "true", points: 3 },
+        { type: "short_answer", prompt: "Name one cell part.", points: 5 },
+      ],
+    },
+  });
+  assert.equal(created.response.status, 201);
+  const quiz = created.body.resource;
+
+  const studentQuizDetail = await request("/api/classrooms/" + classId + "/details", { cookie: studentCookie });
+  const publicQuiz = studentQuizDetail.body.resources.find((resource) => resource.id === quiz.id);
+  assert.equal(publicQuiz.questions.some((question) => "answer" in question), false);
+
+  const submitted = await request("/api/resources/" + quiz.id + "/quiz-responses", {
+    method: "POST",
+    cookie: studentCookie,
+    body: {
+      answers: {
+        [quiz.questions[0].id]: quiz.questions[0].answer,
+        [quiz.questions[1].id]: "true",
+        [quiz.questions[2].id]: "The nucleus.",
+      },
+    },
+  });
+  assert.equal(submitted.response.status, 201);
+  assert.equal(submitted.body.response.autoGrade, 5);
+  assert.equal(submitted.body.response.grade, null);
+
+  const reviews = await request("/api/resources/" + quiz.id + "/quiz-responses", { cookie: teacherCookie });
+  assert.equal(reviews.body.responses[0].answers[quiz.questions[2].id], "The nucleus.");
+  assert.equal(reviews.body.responses[0].autoGrade, 5);
+  const graded = await request("/api/quiz-responses/" + submitted.body.response.id + "/grade", {
+    method: "PUT",
+    cookie: teacherCookie,
+    body: { grades: { [quiz.questions[2].id]: 4 }, feedback: "Good answer." },
+  });
+  assert.equal(graded.response.status, 200);
+  assert.equal(graded.body.response.grade, 9);
+
+  const objectiveQuiz = await request("/api/classrooms/" + classId + "/quizzes", {
+    method: "POST",
+    cookie: teacherCookie,
+    body: {
+      title: "True or false",
+      dueDate,
+      questions: [{ type: "true_false", prompt: "The sun is a star.", answer: "true", points: 7 }],
+    },
+  });
+  const objectiveQuestion = objectiveQuiz.body.resource.questions[0];
+  const objectiveResponse = await request("/api/resources/" + objectiveQuiz.body.resource.id + "/quiz-responses", {
+    method: "POST",
+    cookie: studentCookie,
+    body: { answers: { [objectiveQuestion.id]: "false" } },
+  });
+  assert.equal(objectiveResponse.response.status, 201);
+  assert.equal(objectiveResponse.body.response.grade, 0);
+
+  const maximumQuiz = await request("/api/classrooms/" + classId + "/quizzes", {
+    method: "POST",
+    cookie: teacherCookie,
+    body: {
+      title: "Long quiz",
+      dueDate,
+      questions: Array.from({ length: 50 }, function (_unused, index) {
+        const options = Array.from({ length: 6 }, function (_option, optionIndex) {
+          return "Choice " + optionIndex + " " + "x".repeat(180);
+        });
+        return {
+          type: "multiple_choice",
+          prompt: "Question " + index + " " + "x".repeat(1000),
+          points: 1,
+          options,
+          answer: options[0],
+        };
+      }),
+    },
+  });
+  assert.equal(maximumQuiz.response.status, 201);
+  assert.equal(maximumQuiz.body.resource.questions.length, 50);
+
+  const fileAssignment = await request("/api/classrooms/" + classId + "/assignments", {
+    method: "POST",
+    cookie: teacherCookie,
+    body: {
+      title: "Upload a report",
+      instructions: "Upload your PDF.",
+      dueDate,
+      points: 10,
+      submissionMode: "file",
+      acceptedTypes: ["pdf"],
+    },
+  });
+  assert.equal(fileAssignment.response.status, 201);
+  const missingFile = await request("/api/assignments/" + fileAssignment.body.assignment.id + "/submissions", {
+    method: "POST",
+    cookie: studentCookie,
+    body: { content: "" },
+  });
+  assert.equal(missingFile.response.status, 400);
+});
+
 test("sessions expire on sign out and protected endpoints require authentication", async function () {
   const dashboard = await request("/api/dashboard");
   assert.equal(dashboard.response.status, 401);
@@ -258,6 +378,20 @@ test("sessions expire on sign out and protected endpoints require authentication
   assert.equal(logout.response.status, 204);
   const expired = await request("/api/dashboard", { cookie: loggedIn.cookie });
   assert.equal(expired.response.status, 401);
+
+  const staleLogout = await request("/api/auth/logout", {
+    method: "POST",
+    cookie: "classroom_session=" + "b".repeat(64),
+  });
+  assert.equal(staleLogout.response.status, 204);
+  assert.match(staleLogout.response.headers.get("set-cookie"), /Max-Age=0/);
+
+  const staleSession = await request("/api/auth/me", {
+    cookie: "classroom_session=" + "b".repeat(64),
+  });
+  assert.equal(staleSession.response.status, 200);
+  assert.equal(staleSession.body.user, null);
+  assert.match(staleSession.response.headers.get("set-cookie"), /Max-Age=0/);
 });
 
 test("teachers control class requests, enrollment, and class deletion", async function () {
@@ -295,6 +429,46 @@ test("teachers control class requests, enrollment, and class deletion", async fu
     body: { decision: "approve" },
   });
   assert.equal(approved.body.status, "approved");
+
+  const groupSettings = await request("/api/classrooms/" + classId + "/groups/settings", {
+    method: "PUT",
+    cookie: teacherCookie,
+    body: { groupSize: 2, studentGroupsEnabled: true, leaderIds: [studentAccountId] },
+  });
+  assert.equal(groupSettings.response.status, 200);
+  const studentGroup = await request("/api/classrooms/" + classId + "/groups", {
+    method: "POST",
+    cookie: studentCookie,
+    body: { name: "Study team", memberIds: [otherStudent.body.user.id] },
+  });
+  assert.equal(studentGroup.response.status, 201);
+  assert.equal(studentGroup.body.group.leaderId, studentAccountId);
+  const unassignedLeader = await request("/api/classrooms/" + classId + "/groups", {
+    method: "POST",
+    cookie: otherStudent.cookie,
+    body: { name: "Unauthorized group", memberIds: [studentAccountId] },
+  });
+  assert.equal(unassignedLeader.response.status, 403);
+
+  const randomGroups = await request("/api/classrooms/" + classId + "/groups/random", {
+    method: "POST",
+    cookie: teacherCookie,
+    body: { groupSize: 2 },
+  });
+  assert.equal(randomGroups.response.status, 201);
+  assert.deepEqual(randomGroups.body.groups.map((group) => group.members.length), [2]);
+  const manualGroups = await request("/api/classrooms/" + classId + "/groups/manual", {
+    method: "POST",
+    cookie: teacherCookie,
+    body: {
+      groups: [{
+        name: "Assigned group",
+        studentIds: [studentAccountId, otherStudent.body.user.id],
+      }],
+    },
+  });
+  assert.equal(manualGroups.response.status, 201);
+  assert.equal(manualGroups.body.groups[0].name, "Assigned group");
 
   const removal = await request("/api/classrooms/" + classId + "/students/" + otherStudent.body.user.id, {
     method: "DELETE",

@@ -59,3 +59,80 @@ CREATE TABLE IF NOT EXISTS submissions (
 );
 CREATE INDEX IF NOT EXISTS assignments_classroom ON assignments(classroom_id);
 CREATE INDEX IF NOT EXISTS submissions_assignment ON submissions(assignment_id);
+
+CREATE TABLE IF NOT EXISTS assignment_submission_settings (
+  assignment_id TEXT PRIMARY KEY REFERENCES assignments(id) ON DELETE CASCADE,
+  submission_mode TEXT NOT NULL DEFAULT 'either' CHECK (submission_mode IN ('text', 'file', 'either')),
+  accepted_types TEXT NOT NULL DEFAULT '[]'
+);
+CREATE TABLE IF NOT EXISTS classroom_group_settings (
+  classroom_id TEXT PRIMARY KEY REFERENCES classrooms(id) ON DELETE CASCADE,
+  group_size INTEGER NOT NULL DEFAULT 4 CHECK (group_size BETWEEN 2 AND 20),
+  student_groups_enabled INTEGER NOT NULL DEFAULT 0 CHECK (student_groups_enabled IN (0, 1))
+);
+CREATE TABLE IF NOT EXISTS classroom_group_leaders (
+  classroom_id TEXT NOT NULL REFERENCES classrooms(id) ON DELETE CASCADE,
+  student_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE ON UPDATE CASCADE,
+  PRIMARY KEY (classroom_id, student_id),
+  FOREIGN KEY (classroom_id, student_id) REFERENCES enrollments(classroom_id, student_id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS class_groups (
+  id TEXT PRIMARY KEY,
+  classroom_id TEXT NOT NULL REFERENCES classrooms(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  created_by TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE ON UPDATE CASCADE,
+  leader_id TEXT REFERENCES users(id) ON DELETE SET NULL ON UPDATE CASCADE,
+  created_at TEXT NOT NULL,
+  UNIQUE (id, classroom_id)
+);
+CREATE TABLE IF NOT EXISTS class_group_members (
+  group_id TEXT NOT NULL,
+  classroom_id TEXT NOT NULL,
+  student_id TEXT NOT NULL,
+  joined_at TEXT NOT NULL,
+  PRIMARY KEY (group_id, student_id),
+  UNIQUE (classroom_id, student_id),
+  FOREIGN KEY (group_id, classroom_id) REFERENCES class_groups(id, classroom_id) ON DELETE CASCADE,
+  FOREIGN KEY (classroom_id, student_id) REFERENCES enrollments(classroom_id, student_id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS class_resources (
+  id TEXT PRIMARY KEY,
+  classroom_id TEXT NOT NULL REFERENCES classrooms(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('material', 'quiz')),
+  title TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  due_date TEXT,
+  points INTEGER NOT NULL DEFAULT 0 CHECK (points BETWEEN 0 AND 1000),
+  content TEXT NOT NULL DEFAULT '[]',
+  created_by TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE ON UPDATE CASCADE,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS quiz_responses (
+  id TEXT PRIMARY KEY,
+  resource_id TEXT NOT NULL REFERENCES class_resources(id) ON DELETE CASCADE,
+  student_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE ON UPDATE CASCADE,
+  answers TEXT NOT NULL,
+  auto_grade DOUBLE PRECISION NOT NULL DEFAULT 0,
+  grade DOUBLE PRECISION,
+  feedback TEXT NOT NULL DEFAULT '',
+  submitted_at TEXT NOT NULL,
+  graded_at TEXT,
+  UNIQUE (resource_id, student_id)
+);
+CREATE TABLE IF NOT EXISTS class_files (
+  id TEXT PRIMARY KEY,
+  classroom_id TEXT NOT NULL REFERENCES classrooms(id) ON DELETE CASCADE,
+  resource_id TEXT REFERENCES class_resources(id) ON DELETE CASCADE,
+  submission_id TEXT REFERENCES submissions(id) ON DELETE CASCADE,
+  uploader_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE ON UPDATE CASCADE,
+  original_name TEXT NOT NULL,
+  storage_path TEXT NOT NULL UNIQUE,
+  mime_type TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL CHECK (size_bytes BETWEEN 1 AND 20971520),
+  created_at TEXT NOT NULL,
+  CHECK ((resource_id IS NOT NULL AND submission_id IS NULL) OR
+         (resource_id IS NULL AND submission_id IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS class_groups_classroom ON class_groups(classroom_id);
+CREATE INDEX IF NOT EXISTS class_resources_classroom ON class_resources(classroom_id, created_at);
+CREATE INDEX IF NOT EXISTS quiz_responses_resource ON quiz_responses(resource_id);
