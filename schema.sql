@@ -1,8 +1,10 @@
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
+  username TEXT NOT NULL UNIQUE,
   email TEXT NOT NULL UNIQUE,
   role TEXT NOT NULL CHECK (role IN ('teacher', 'student')),
+  password_hint TEXT,
   password_salt TEXT NOT NULL,
   password_hash TEXT NOT NULL,
   created_at TEXT NOT NULL
@@ -67,8 +69,12 @@ CREATE TABLE IF NOT EXISTS assignment_submission_settings (
 );
 CREATE TABLE IF NOT EXISTS classroom_group_settings (
   classroom_id TEXT PRIMARY KEY REFERENCES classrooms(id) ON DELETE CASCADE,
-  group_size INTEGER NOT NULL DEFAULT 4 CHECK (group_size BETWEEN 2 AND 20),
-  student_groups_enabled INTEGER NOT NULL DEFAULT 0 CHECK (student_groups_enabled IN (0, 1))
+  group_size INTEGER NOT NULL DEFAULT 4 CHECK (group_size BETWEEN 4 AND 12),
+  student_groups_enabled INTEGER NOT NULL DEFAULT 0 CHECK (student_groups_enabled IN (0, 1)),
+  min_group_size INTEGER NOT NULL DEFAULT 4 CHECK (min_group_size BETWEEN 4 AND 12),
+  max_group_size INTEGER NOT NULL DEFAULT 12 CHECK (max_group_size BETWEEN 4 AND 12),
+  group_count INTEGER,
+  group_mode TEXT NOT NULL DEFAULT 'random' CHECK (group_mode IN ('random', 'student-led'))
 );
 CREATE TABLE IF NOT EXISTS classroom_group_leaders (
   classroom_id TEXT NOT NULL REFERENCES classrooms(id) ON DELETE CASCADE,
@@ -93,6 +99,26 @@ CREATE TABLE IF NOT EXISTS class_group_members (
   PRIMARY KEY (group_id, student_id),
   UNIQUE (classroom_id, student_id),
   FOREIGN KEY (group_id, classroom_id) REFERENCES class_groups(id, classroom_id) ON DELETE CASCADE,
+  FOREIGN KEY (classroom_id, student_id) REFERENCES enrollments(classroom_id, student_id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS class_group_requests (
+  id TEXT PRIMARY KEY,
+  classroom_id TEXT NOT NULL REFERENCES classrooms(id) ON DELETE CASCADE,
+  leader_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE ON UPDATE CASCADE,
+  name TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
+  created_at TEXT NOT NULL,
+  decided_at TEXT,
+  FOREIGN KEY (classroom_id, leader_id) REFERENCES enrollments(classroom_id, student_id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS class_group_requests_pending_leader
+  ON class_group_requests (classroom_id, leader_id) WHERE status = 'pending';
+CREATE TABLE IF NOT EXISTS group_member_reservations (
+  classroom_id TEXT NOT NULL,
+  student_id TEXT NOT NULL,
+  request_id TEXT NOT NULL REFERENCES class_group_requests(id) ON DELETE CASCADE,
+  PRIMARY KEY (classroom_id, student_id),
+  UNIQUE (request_id, student_id),
   FOREIGN KEY (classroom_id, student_id) REFERENCES enrollments(classroom_id, student_id) ON DELETE CASCADE
 );
 CREATE TABLE IF NOT EXISTS class_resources (

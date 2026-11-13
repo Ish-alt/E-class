@@ -61,54 +61,126 @@ test("serves the landing page without exposing project files", async function ()
   assert.equal(anonymousUser.body.user, null);
 });
 
-test("migrates existing account IDs and preserves linked records and sessions", async function () {
+test("migrates legacy usernames and role-prefixed IDs while preserving linked records and sessions", async function () {
   const legacyCookie = "classroom_session=" + legacySessionToken;
   const me = await request("/api/auth/me", { cookie: legacyCookie });
   assert.equal(me.response.status, 200);
-  assert.match(me.body.user.id, /^[A-Z]{2}-\d{2}-[A-Z]{2}$/);
+  assert.match(me.body.user.id, /^TC-\d{2}-[A-Z]{2}$/);
+  assert.equal(me.body.user.username, "legacy");
   assert.notEqual(me.body.user.id, "legacy-user-id");
 
   const dashboard = await request("/api/dashboard", { cookie: legacyCookie });
   assert.equal(dashboard.response.status, 200);
   assert.equal(dashboard.body.classrooms[0].id, "legacy-class");
-  assert.match(dashboard.body.classrooms[0].students[0].id, /^[A-Z]{2}-\d{2}-[A-Z]{2}$/);
+  assert.match(dashboard.body.classrooms[0].students[0].id, /^ST-\d{2}-[A-Z]{2}$/);
+  assert.equal(dashboard.body.classrooms[0].students[0].username, undefined);
   assert.equal(dashboard.body.classrooms[0].joinRequests[0].studentId, dashboard.body.classrooms[0].students[0].id);
   assert.equal(dashboard.body.submissions[0].studentId, dashboard.body.classrooms[0].students[0].id);
+  const legacyClassDetails = await request("/api/classrooms/legacy-class/details", { cookie: legacyCookie });
+  assert.equal(legacyClassDetails.body.groupSettings.minGroupSize, 4);
+  assert.equal(legacyClassDetails.body.groupSettings.maxGroupSize, 12);
 
   const login = await request("/api/auth/login", {
     method: "POST",
-    body: { accountId: me.body.user.id.toLowerCase(), password: "LegacyPass123" },
+    body: { username: "LEGACY", password: "LegacyPass123" },
   });
   assert.equal(login.response.status, 200);
 });
 
 test("registers separate teacher and student accounts", async function () {
-  const teacher = await register("Teacher One", "teacher@example.test", "TeacherPass123", "teacher");
+  const teacher = await register("Teacher", "One", "teacher.one", "teacher@example.test", "TeacherPass123!", "teacher",
+    "My favorite subject");
   teacherCookie = teacher.cookie;
   teacherAccountId = teacher.body.user.id;
   assert.equal(teacher.response.status, 201);
   assert.equal(teacher.body.user.role, "teacher");
-  assert.match(teacherAccountId, /^[A-Z]{2}-\d{2}-[A-Z]{2}$/);
+  assert.match(teacherAccountId, /^TC-\d{2}-[A-Z]{2}$/);
+  assert.equal(teacher.body.user.name, "Teacher One");
+  assert.equal(teacher.body.user.username, "teacher.one");
+  assert.equal("passwordHint" in teacher.body.user, false);
 
-  const student = await register("Student One", "student@example.test", "StudentPass123", "student");
+  const student = await register("Student", "One", "student.one", "student@example.test", "StudentPass123!", "student");
   studentCookie = student.cookie;
   studentAccountId = student.body.user.id;
   assert.equal(student.response.status, 201);
   assert.equal(student.body.user.role, "student");
-  assert.match(studentAccountId, /^[A-Z]{2}-\d{2}-[A-Z]{2}$/);
+  assert.match(studentAccountId, /^ST-\d{2}-[A-Z]{2}$/);
   assert.notEqual(teacherAccountId, studentAccountId);
 
-  const duplicate = await request("/api/auth/register", {
+  const duplicateEmail = await request("/api/auth/register", {
     method: "POST",
-    body: { name: "Another Teacher", email: "TEACHER@example.test", password: "TeacherPass456", role: "teacher" },
+    body: {
+      firstName: "Another",
+      lastName: "Teacher",
+      username: "another.teacher",
+      email: "TEACHER@example.test",
+      password: "TeacherPass456!",
+      confirmPassword: "TeacherPass456!",
+      role: "teacher",
+    },
   });
-  assert.equal(duplicate.response.status, 409);
+  assert.equal(duplicateEmail.response.status, 409);
 
-  const weakPassword = await request("/api/auth/register", {
+  const duplicateUsername = await request("/api/auth/register", {
     method: "POST",
-    body: { name: "Weak Pass", email: "weak@example.test", password: "short", role: "student" },
+    body: {
+      firstName: "Another",
+      lastName: "Teacher",
+      username: "TEACHER.ONE",
+      email: "another.teacher@example.test",
+      password: "TeacherPass456!",
+      confirmPassword: "TeacherPass456!",
+      role: "teacher",
+    },
   });
-  assert.equal(weakPassword.response.status, 400);
+  assert.equal(duplicateUsername.response.status, 409);
+
+  for (const password of ["weakpass1!", "Weakpass1", "WEAKPASS1!", "WeakPass!!"]) {
+    const weakPassword = await request("/api/auth/register", {
+      method: "POST",
+      body: {
+        firstName: "Weak",
+        lastName: "Password",
+        username: "weak" + password.length + Math.random().toString(36).slice(2, 6),
+        email: "weak-" + Math.random().toString(36).slice(2, 8) + "@example.test",
+        password,
+        confirmPassword: password,
+        role: "student",
+      },
+    });
+    assert.equal(weakPassword.response.status, 400);
+  }
+
+  const mismatchedPassword = await request("/api/auth/register", {
+    method: "POST",
+    body: {
+      firstName: "Mismatch",
+      lastName: "Password",
+      username: "mismatch",
+      email: "mismatch@example.test",
+      password: "StrongPass123!",
+      confirmPassword: "OtherPass123!",
+      role: "student",
+    },
+  });
+  assert.equal(mismatchedPassword.response.status, 400);
+
+  const hint = await request("/api/auth/hint", {
+    method: "POST",
+    body: { username: "TEACHER.ONE" },
+  });
+  assert.equal(hint.response.status, 200);
+  assert.equal(hint.body.hint, "My favorite subject");
+
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
+    const incorrect = await request("/api/auth/login", {
+      method: "POST",
+      body: { username: "teacher.one", password: "IncorrectPass123!" },
+    });
+    assert.equal(incorrect.response.status, 401);
+    assert.equal(incorrect.body.hintUnlocked === true, attempt > 3);
+    if (attempt === 4) assert.equal(incorrect.body.passwordHint, "My favorite subject");
+  }
 });
 
 test("teacher-created classes can be joined using a private code", async function () {
@@ -161,6 +233,25 @@ test("teacher-created classes can be joined using a private code", async functio
   assert.equal(approvedTeacherDashboard.body.classrooms[0].students[0].name, "Student One");
   assert.equal(approvedTeacherDashboard.body.classrooms[0].students[0].email, "student@example.test");
   assert.ok(approvedTeacherDashboard.body.classrooms[0].students[0].joinedAt);
+
+  const uploadForm = new FormData();
+  uploadForm.set("title", "Class notes");
+  uploadForm.set("description", "Shared lesson notes");
+  uploadForm.set("file", new Blob(["lesson notes"], { type: "text/plain" }), "lesson-notes.txt");
+  const uploaded = await requestForm("/api/classrooms/" + classId + "/materials", {
+    method: "POST",
+    cookie: teacherCookie,
+    body: uploadForm,
+  });
+  assert.equal(uploaded.response.status, 201);
+  const classroomDetails = await request("/api/classrooms/" + classId + "/details", { cookie: teacherCookie });
+  const sharedMaterial = classroomDetails.body.resources.find((resource) => resource.title === "Class notes");
+  assert.equal(sharedMaterial.file.name, "lesson-notes.txt");
+  const downloadedFile = await fetch(baseUrl + "/api/files/" + sharedMaterial.file.id, {
+    headers: { Origin: baseUrl, Cookie: studentCookie },
+  });
+  assert.equal(downloadedFile.status, 200);
+  assert.equal(await downloadedFile.text(), "lesson notes");
 
   const duplicateJoin = await request("/api/classrooms/join", {
     method: "POST",
@@ -230,7 +321,7 @@ test("students submit work and only the owning teacher can grade it", async func
   });
   assert.equal(editAfterGrade.response.status, 409);
 
-  const otherTeacher = await register("Teacher Two", "teacher2@example.test", "TeacherPass789", "teacher");
+  const otherTeacher = await register("Teacher", "Two", "teacher.two", "teacher2@example.test", "TeacherPass789!", "teacher");
   const stolenGrade = await request("/api/submissions/" + submissionId + "/grade", {
     method: "PUT",
     cookie: otherTeacher.cookie,
@@ -365,12 +456,12 @@ test("sessions expire on sign out and protected endpoints require authentication
 
   const loggedIn = await request("/api/auth/login", {
     method: "POST",
-    body: { accountId: studentAccountId, password: "StudentPass123" },
+    body: { username: "student.one", password: "StudentPass123!" },
   });
   assert.equal(loggedIn.response.status, 200);
   const emailLogin = await request("/api/auth/login", {
     method: "POST",
-    body: { accountId: "student@example.test", password: "StudentPass123" },
+    body: { username: "student@example.test", password: "StudentPass123!" },
   });
   assert.equal(emailLogin.response.status, 401);
   loggedIn.cookie = loggedIn.response.headers.get("set-cookie").split(";")[0];
@@ -395,7 +486,7 @@ test("sessions expire on sign out and protected endpoints require authentication
 });
 
 test("teachers control class requests, enrollment, and class deletion", async function () {
-  const otherStudent = await register("Student Two", "student2@example.test", "StudentPass456", "student");
+  const otherStudent = await register("Student", "Two", "student.two", "student2@example.test", "StudentPass456!", "student");
   const classroom = await request("/api/dashboard", { cookie: teacherCookie });
   const joinCode = classroom.body.classrooms[0].joinCode;
 
@@ -430,45 +521,198 @@ test("teachers control class requests, enrollment, and class deletion", async fu
   });
   assert.equal(approved.body.status, "approved");
 
+  const addedStudents = [];
+  for (let index = 3; index <= 5; index += 1) {
+    const newStudent = await register(
+      "Student",
+      String(index),
+      "student." + index,
+      "student" + index + "@example.test",
+      "StudentPass" + index + "A!",
+      "student",
+    );
+    addedStudents.push(newStudent);
+    const join = await request("/api/classrooms/join", {
+      method: "POST",
+      cookie: newStudent.cookie,
+      body: { joinCode },
+    });
+    assert.equal(join.response.status, 202);
+    const requestList = await request("/api/classrooms/" + classId + "/join-requests", { cookie: teacherCookie });
+    const pending = requestList.body.requests.find((item) => item.studentId === newStudent.body.user.id);
+    const decision = await request("/api/classrooms/" + classId + "/join-requests/" + pending.id, {
+      method: "PUT",
+      cookie: teacherCookie,
+      body: { decision: "approve" },
+    });
+    assert.equal(decision.body.status, "approved");
+  }
+
+  const extraGroupStudents = [];
+  for (let index = 6; index <= 8; index += 1) {
+    const newStudent = await register(
+      "Student",
+      String(index),
+      "student." + index,
+      "student" + index + "@example.test",
+      "StudentPass" + index + "A!",
+      "student",
+    );
+    extraGroupStudents.push(newStudent);
+    await request("/api/classrooms/join", {
+      method: "POST",
+      cookie: newStudent.cookie,
+      body: { joinCode },
+    });
+    const requestList = await request("/api/classrooms/" + classId + "/join-requests", { cookie: teacherCookie });
+    const pending = requestList.body.requests.find((item) => item.studentId === newStudent.body.user.id);
+    const decision = await request("/api/classrooms/" + classId + "/join-requests/" + pending.id, {
+      method: "PUT",
+      cookie: teacherCookie,
+      body: { decision: "approve" },
+    });
+    assert.equal(decision.body.status, "approved");
+  }
+
   const groupSettings = await request("/api/classrooms/" + classId + "/groups/settings", {
     method: "PUT",
     cookie: teacherCookie,
-    body: { groupSize: 2, studentGroupsEnabled: true, leaderIds: [studentAccountId] },
+    body: { minGroupSize: 4, maxGroupSize: 12, groupCount: 2, mode: "student-led", leaderIds: [studentAccountId, otherStudent.body.user.id] },
   });
   assert.equal(groupSettings.response.status, 200);
-  const studentGroup = await request("/api/classrooms/" + classId + "/groups", {
+  const tooSmallGroupSetting = await request("/api/classrooms/" + classId + "/groups/settings", {
+    method: "PUT",
+    cookie: teacherCookie,
+    body: { minGroupSize: 3, maxGroupSize: 12, groupCount: 1, mode: "random", leaderIds: [] },
+  });
+  assert.equal(tooSmallGroupSetting.response.status, 400);
+  const missingLeader = await request("/api/classrooms/" + classId + "/groups/settings", {
+    method: "PUT",
+    cookie: teacherCookie,
+    body: { minGroupSize: 4, maxGroupSize: 12, groupCount: 2, mode: "student-led", leaderIds: [studentAccountId] },
+  });
+  assert.equal(missingLeader.response.status, 400);
+  const invalidGroupCount = await request("/api/classrooms/" + classId + "/groups/settings", {
+    method: "PUT",
+    cookie: teacherCookie,
+    body: { minGroupSize: 4, maxGroupSize: 12, groupCount: 3, mode: "student-led", leaderIds: [studentAccountId, otherStudent.body.user.id, addedStudents[0].body.user.id] },
+  });
+  assert.equal(invalidGroupCount.response.status, 400);
+  const mixedGroupModes = await request("/api/classrooms/" + classId + "/groups/settings", {
+    method: "PUT",
+    cookie: teacherCookie,
+    body: { minGroupSize: 4, maxGroupSize: 12, groupCount: 2, mode: "random", leaderIds: [studentAccountId] },
+  });
+  assert.equal(mixedGroupModes.response.status, 400);
+  const undersizedStudentGroup = await request("/api/classrooms/" + classId + "/group-requests", {
     method: "POST",
     cookie: studentCookie,
-    body: { name: "Study team", memberIds: [otherStudent.body.user.id] },
+    body: { name: "Too small", memberIds: [otherStudent.body.user.id] },
   });
-  assert.equal(studentGroup.response.status, 201);
-  assert.equal(studentGroup.body.group.leaderId, studentAccountId);
-  const unassignedLeader = await request("/api/classrooms/" + classId + "/groups", {
+  assert.equal(undersizedStudentGroup.response.status, 400);
+  const pendingStudentGroup = await request("/api/classrooms/" + classId + "/group-requests", {
     method: "POST",
-    cookie: otherStudent.cookie,
-    body: { name: "Unauthorized group", memberIds: [studentAccountId] },
+    cookie: studentCookie,
+    body: {
+      name: "Study team",
+      memberIds: [addedStudents[0].body.user.id, addedStudents[1].body.user.id, addedStudents[2].body.user.id],
+    },
+  });
+  assert.equal(pendingStudentGroup.response.status, 202);
+  assert.equal(pendingStudentGroup.body.request.status, "pending");
+  const teacherDetailsWithRequest = await request("/api/classrooms/" + classId + "/details", { cookie: teacherCookie });
+  assert.equal(teacherDetailsWithRequest.body.groupRequests.length, 1);
+  assert.equal(teacherDetailsWithRequest.body.groupRequests[0].members.length, 4);
+  const studentDetailsWithReservation = await request("/api/classrooms/" + classId + "/details", { cookie: otherStudent.cookie });
+  assert.equal(studentDetailsWithReservation.body.students.find((student) => student.id === addedStudents[0].body.user.id).groupUnavailable, true);
+  const unassignedLeader = await request("/api/classrooms/" + classId + "/group-requests", {
+    method: "POST",
+    cookie: addedStudents[2].cookie,
+    body: { name: "Unauthorized group", memberIds: [studentAccountId, addedStudents[0].body.user.id, addedStudents[1].body.user.id] },
   });
   assert.equal(unassignedLeader.response.status, 403);
+
+  const rejectedGroup = await request("/api/classrooms/" + classId + "/group-requests/" + pendingStudentGroup.body.request.id, {
+    method: "PUT",
+    cookie: teacherCookie,
+    body: { decision: "reject" },
+  });
+  assert.equal(rejectedGroup.body.status, "rejected");
+  const releasedReservation = await request("/api/classrooms/" + classId + "/details", { cookie: otherStudent.cookie });
+  assert.equal(releasedReservation.body.students.find((student) => student.id === addedStudents[0].body.user.id).groupUnavailable, false);
+
+  const resubmittedGroup = await request("/api/classrooms/" + classId + "/group-requests", {
+    method: "POST",
+    cookie: studentCookie,
+    body: {
+      name: "Study team",
+      memberIds: addedStudents.map((student) => student.body.user.id),
+    },
+  });
+  assert.equal(resubmittedGroup.response.status, 202);
+  const approvedGroup = await request("/api/classrooms/" + classId + "/group-requests/" + resubmittedGroup.body.request.id, {
+    method: "PUT",
+    cookie: teacherCookie,
+    body: { decision: "approve" },
+  });
+  assert.equal(approvedGroup.body.status, "approved");
+  const studentDetails = await request("/api/classrooms/" + classId + "/details", { cookie: studentCookie });
+  assert.equal(studentDetails.body.groups.length, 1);
+  assert.equal(studentDetails.body.groups[0].members.length, 4);
+  assert.equal(studentDetails.body.students.length, 8);
+  assert.equal(studentDetails.body.students.some((student) => "email" in student), false);
+  const secondStudentGroup = await request("/api/classrooms/" + classId + "/group-requests", {
+    method: "POST",
+    cookie: otherStudent.cookie,
+    body: { name: "Second team", memberIds: extraGroupStudents.map((student) => student.body.user.id) },
+  });
+  assert.equal(secondStudentGroup.response.status, 202);
+  const approvedSecondGroup = await request("/api/classrooms/" + classId + "/group-requests/" + secondStudentGroup.body.request.id, {
+    method: "PUT",
+    cookie: teacherCookie,
+    body: { decision: "approve" },
+  });
+  assert.equal(approvedSecondGroup.body.status, "approved");
+  const teacherDetailsWithGroup = await request("/api/classrooms/" + classId + "/details", { cookie: teacherCookie });
+  assert.equal(teacherDetailsWithGroup.body.groups.length, 2);
+  assert.equal(teacherDetailsWithGroup.body.groups[0].members.length, 4);
 
   const randomGroups = await request("/api/classrooms/" + classId + "/groups/random", {
     method: "POST",
     cookie: teacherCookie,
-    body: { groupSize: 2 },
+    body: {},
   });
-  assert.equal(randomGroups.response.status, 201);
-  assert.deepEqual(randomGroups.body.groups.map((group) => group.members.length), [2]);
+  assert.equal(randomGroups.response.status, 409);
+  const clearGroups = await request("/api/classrooms/" + classId + "/groups", {
+    method: "DELETE",
+    cookie: teacherCookie,
+  });
+  assert.equal(clearGroups.response.status, 204);
+  const randomSettings = await request("/api/classrooms/" + classId + "/groups/settings", {
+    method: "PUT",
+    cookie: teacherCookie,
+    body: { minGroupSize: 4, maxGroupSize: 12, groupCount: 2, mode: "random", leaderIds: [] },
+  });
+  assert.equal(randomSettings.response.status, 200);
+  const randomGroupsCreated = await request("/api/classrooms/" + classId + "/groups/random", {
+    method: "POST",
+    cookie: teacherCookie,
+    body: {},
+  });
+  assert.equal(randomGroupsCreated.response.status, 201);
+  assert.deepEqual(randomGroupsCreated.body.groups.map((group) => group.members.length).sort(), [4, 4]);
   const manualGroups = await request("/api/classrooms/" + classId + "/groups/manual", {
     method: "POST",
     cookie: teacherCookie,
     body: {
       groups: [{
         name: "Assigned group",
-        studentIds: [studentAccountId, otherStudent.body.user.id],
+        studentIds: [studentAccountId, otherStudent.body.user.id, ...addedStudents.map((student) => student.body.user.id),
+          ...extraGroupStudents.map((student) => student.body.user.id)],
       }],
     },
   });
-  assert.equal(manualGroups.response.status, 201);
-  assert.equal(manualGroups.body.groups[0].name, "Assigned group");
+  assert.equal(manualGroups.response.status, 404);
 
   const removal = await request("/api/classrooms/" + classId + "/students/" + otherStudent.body.user.id, {
     method: "DELETE",
@@ -486,7 +730,7 @@ test("teachers control class requests, enrollment, and class deletion", async fu
   assert.equal(leftDashboard.body.classrooms.length, 0);
   assert.equal(leftDashboard.body.assignments.length, 0);
 
-  const anotherTeacher = await register("Other Owner", "owner@example.test", "OwnerPass123", "teacher");
+  const anotherTeacher = await register("Other", "Owner", "other.owner", "owner@example.test", "OwnerPass123!", "teacher");
   const deniedDelete = await request("/api/classrooms/" + classId, {
     method: "DELETE",
     cookie: anotherTeacher.cookie,
@@ -511,6 +755,7 @@ test("users can securely update their account profile and password", async funct
     cookie: teacherCookie,
     body: {
       name: "Updated Teacher",
+      username: "teacher.one",
       email: "updated.teacher@example.test",
       currentPassword: "wrong-password",
       newPassword: "",
@@ -523,24 +768,31 @@ test("users can securely update their account profile and password", async funct
     cookie: teacherCookie,
     body: {
       name: "Updated Teacher",
+      username: "teacher.updated",
       email: "updated.teacher@example.test",
-      currentPassword: "TeacherPass123",
-      newPassword: "UpdatedPass123",
+      currentPassword: "TeacherPass123!",
+      newPassword: "UpdatedPass123!",
     },
   });
   assert.equal(updated.response.status, 200);
   assert.equal(updated.body.user.name, "Updated Teacher");
+  assert.equal(updated.body.user.username, "teacher.updated");
   assert.equal(updated.body.user.email, "updated.teacher@example.test");
   assert.equal(updated.body.user.id, teacherAccountId);
 
   const loginAfterEmailChange = await request("/api/auth/login", {
     method: "POST",
-    body: { accountId: teacherAccountId, password: "TeacherPass123" },
+    body: { username: "teacher.one", password: "TeacherPass123!" },
   });
   assert.equal(loginAfterEmailChange.response.status, 401);
+  const loginAfterUsernameChange = await request("/api/auth/login", {
+    method: "POST",
+    body: { username: "teacher.updated", password: "TeacherPass123!" },
+  });
+  assert.equal(loginAfterUsernameChange.response.status, 401);
   const loginAfterPasswordChange = await request("/api/auth/login", {
     method: "POST",
-    body: { accountId: teacherAccountId, password: "UpdatedPass123" },
+    body: { username: "teacher.updated", password: "UpdatedPass123!" },
   });
   assert.equal(loginAfterPasswordChange.response.status, 200);
   assert.equal(loginAfterPasswordChange.body.user.role, "teacher");
@@ -550,12 +802,26 @@ test("users can securely update their account profile and password", async funct
     cookie: studentCookie,
     body: {
       name: "Student One",
+      username: "student.one",
       email: "updated.teacher@example.test",
-      currentPassword: "StudentPass123",
+      currentPassword: "StudentPass123!",
       newPassword: "",
     },
   });
   assert.equal(duplicateEmail.response.status, 409);
+
+  const duplicateUsername = await request("/api/auth/profile", {
+    method: "PUT",
+    cookie: studentCookie,
+    body: {
+      name: "Student One",
+      username: "teacher.updated",
+      email: "student@example.test",
+      currentPassword: "StudentPass123!",
+      newPassword: "",
+    },
+  });
+  assert.equal(duplicateUsername.response.status, 409);
 });
 
 function seedLegacyDatabase() {
@@ -640,6 +906,15 @@ function seedLegacyDatabase() {
     INSERT INTO classrooms (id, teacher_id, name, subject, join_code, color, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?)
   `).run("legacy-class", legacyId, "Legacy Class", "History", "LEGACY", "lilac", new Date().toISOString());
+  database.exec(`
+    CREATE TABLE classroom_group_settings (
+      classroom_id TEXT PRIMARY KEY REFERENCES classrooms(id),
+      group_size INTEGER NOT NULL DEFAULT 4 CHECK (group_size BETWEEN 2 AND 20),
+      student_groups_enabled INTEGER NOT NULL DEFAULT 0
+    );
+  `);
+  database.prepare("INSERT INTO classroom_group_settings (classroom_id, group_size) VALUES (?, ?)")
+    .run("legacy-class", 20);
   database.prepare("INSERT INTO enrollments (classroom_id, student_id, joined_at) VALUES (?, ?, ?)")
     .run("legacy-class", legacyStudentId, new Date().toISOString());
   database.prepare(`
@@ -658,10 +933,19 @@ function seedLegacyDatabase() {
   database.close();
 }
 
-async function register(name, email, password, role) {
+async function register(firstName, lastName, username, email, password, role, passwordHint) {
   const result = await request("/api/auth/register", {
     method: "POST",
-    body: { name, email, password, role },
+    body: {
+      firstName,
+      lastName,
+      username,
+      email,
+      password,
+      confirmPassword: password,
+      passwordHint: passwordHint || "",
+      role,
+    },
   });
   result.cookie = result.response.headers.get("set-cookie").split(";")[0];
   return result;
@@ -682,6 +966,18 @@ async function request(url, options) {
   });
   const body = response.status === 204 ? null : await response.json();
   return { response, body };
+}
+
+async function requestForm(url, options) {
+  const config = Object.assign({}, options || {});
+  const headers = { Origin: baseUrl };
+  if (config.cookie) headers.Cookie = config.cookie;
+  const response = await fetch(baseUrl + url, {
+    method: config.method || "POST",
+    headers,
+    body: config.body,
+  });
+  return { response, body: await response.json() };
 }
 
 async function reservePort() {

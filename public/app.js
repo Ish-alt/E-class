@@ -25,6 +25,42 @@
     ["png", "PNG"], ["jpg", "JPG"], ["jpeg", "JPEG"], ["webp", "WEBP"],
   ];
   let confirmationResolver = null;
+  const revealObserver = !window.matchMedia("(prefers-reduced-motion: reduce)").matches &&
+    "IntersectionObserver" in window
+    ? new IntersectionObserver(function (entries, observer) {
+      entries.forEach(function (entry) {
+        if (!entry.isIntersecting) return;
+        entry.target.classList.add("motion-visible");
+        observer.unobserve(entry.target);
+      });
+    }, { rootMargin: "0px 0px -36px 0px", threshold: 0.08 })
+    : null;
+
+  if (revealObserver) document.documentElement.classList.add("motion-enabled");
+
+  function observeScrollReveal(container) {
+    if (!revealObserver) return;
+    const revealTargets = container.querySelectorAll(
+      ".landing-v2-hero > *, .showcase-row, .landing-final-cta, .auth-card, .welcome-row, .stats-grid, " +
+      ".section-heading, .class-card, .assignment-card, .assignment-list > *, .inbox-list > *, " +
+      ".class-detail-header, .class-detail-tabs, .class-overview-card, .resource-row, " +
+      ".class-group-card, .settings-card, .content-grid > *"
+    );
+    revealTargets.forEach(function (element, index) {
+      if (element.classList.contains("motion-reveal")) return;
+      element.classList.add("motion-reveal");
+      element.style.setProperty("--motion-delay", Math.min(index, 4) * 55 + "ms");
+      revealObserver.observe(element);
+    });
+  }
+
+  function setButtonLoading(button, isLoading) {
+    if (!button) return;
+    button.disabled = isLoading;
+    button.classList.toggle("is-loading", isLoading);
+    if (isLoading) button.setAttribute("aria-busy", "true");
+    else button.removeAttribute("aria-busy");
+  }
 
   document.getElementById("current-year").textContent = new Date().getFullYear();
 
@@ -42,6 +78,10 @@
     } else if (action === "switch-auth") {
       state.authMode = target.dataset.mode;
       renderLanding();
+    } else if (action === "toggle-password-visibility") {
+      togglePasswordVisibility(target);
+    } else if (action === "toggle-password-hint") {
+      togglePasswordHint(target);
     } else if (action === "set-view") {
       state.view = target.dataset.view;
       state.classFilter = "all";
@@ -63,18 +103,20 @@
       openCreateQuizModal(target.dataset.classId);
     } else if (action === "open-group-settings") {
       openGroupSettingsModal();
-    } else if (action === "open-manual-groups") {
-      openManualGroupsModal();
     } else if (action === "create-random-groups") {
       createRandomGroups(target);
     } else if (action === "open-student-group") {
       openStudentGroupModal();
+    } else if (action === "clear-group-setup") {
+      clearGroupSetup(target);
+    } else if (action === "approve-group-request" || action === "reject-group-request") {
+      decideGroupRequest(target, action === "approve-group-request" ? "approve" : "reject");
     } else if (action === "add-quiz-question") {
       addQuizQuestion();
     } else if (action === "open-quiz") {
       openQuizModal(target.dataset.resourceId);
     } else if (action === "review-quiz") {
-      reviewQuiz(target.dataset.resourceId);
+      reviewQuiz(target.dataset.resourceId, target);
     } else if (action === "open-settings") {
       state.view = "settings";
       renderDashboard();
@@ -109,8 +151,35 @@
     if (event.target.matches("#assignment-class-filter")) {
       state.classFilter = event.target.value;
       renderDashboard();
+    } else if (event.target.matches(".group-setup-input")) {
+      updateGroupSetupForm(event.target.closest("[data-modal-form]"));
+    } else if (event.target.matches(".student-group-member")) {
+      updateStudentGroupSelection(event.target.closest("[data-modal-form]"));
     } else if (event.target.matches(".quiz-question-type")) {
       updateQuizQuestionEditor(event.target.closest(".quiz-question-editor"));
+    }
+  });
+
+  document.addEventListener("input", function (event) {
+    const form = event.target.closest("[data-auth-form]");
+    if (!form) return;
+    if (form.dataset.mode === "register" &&
+      (event.target.name === "password" || event.target.name === "confirmPassword")) {
+      const password = form.elements.password.value;
+      const confirmation = form.elements.confirmPassword;
+      confirmation.setCustomValidity(confirmation.value && confirmation.value !== password
+        ? "Passwords do not match."
+        : "");
+    }
+    if (event.target.name === "username") {
+      const hint = form.querySelector("#auth-password-hint");
+      const hintButton = form.querySelector('[data-action="toggle-password-hint"]');
+      if (hint) hint.hidden = true;
+      if (hintButton) {
+        hintButton.dataset.hintVisible = "false";
+        hintButton.setAttribute("aria-expanded", "false");
+        hintButton.textContent = "Show password hint";
+      }
     }
   });
 
@@ -149,11 +218,20 @@
   });
 
   document.getElementById("logout-button").addEventListener("click", async function () {
+    const button = this;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(function () { controller.abort(); }, 10000);
+    setButtonLoading(button, true);
     try {
-      await api("/api/auth/logout", { method: "POST" });
-    } catch {
-      showToast("Could not sign out. Please try again.", "error");
+      await api("/api/auth/logout", { method: "POST", signal: controller.signal });
+    } catch (error) {
+      showToast(error.name === "AbortError"
+        ? "Sign out timed out. Check your connection and try again."
+        : "Could not sign out. Please try again.", "error");
       return;
+    } finally {
+      clearTimeout(timeoutId);
+      setButtonLoading(button, false);
     }
     state.user = null;
     state.classrooms = [];
@@ -195,6 +273,8 @@
     if (!response.ok) {
       const error = new Error(payload.error || "Something went wrong. Please try again.");
       error.status = response.status;
+      error.hintUnlocked = payload.hintUnlocked === true;
+      error.passwordHint = typeof payload.passwordHint === "string" ? payload.passwordHint : "";
       throw error;
     }
     return payload;
@@ -259,6 +339,7 @@
     } else {
       authScreen.innerHTML = renderLandingPage();
     }
+    observeScrollReveal(authScreen);
   }
 
   function renderLandingPage() {
@@ -346,9 +427,9 @@
               <div class="visual-paper roster-paper">
                 <span class="visual-eyebrow">BIOLOGY 101 <span class="roster-count">18 STUDENTS</span></span>
                 <strong class="paper-heading">Your people, all here.</strong>
-                <div class="roster-person"><span class="roster-avatar avatar-one">AM</span><span><strong>Alex Morgan</strong><small>Joined this week</small></span><span class="roster-check">✓</span></div>
-                <div class="roster-person"><span class="roster-avatar avatar-two">JL</span><span><strong>Jordan Lee</strong><small>Joined this week</small></span><span class="roster-check">✓</span></div>
-                <div class="roster-person"><span class="roster-avatar avatar-three">SK</span><span><strong>Sam Kim</strong><small>Joined last week</small></span><span class="roster-check">✓</span></div>
+                <div class="roster-person"><span class="roster-avatar avatar-one">DT</span><span><strong>Dagim Temesgen</strong><small>Joined this week</small></span><span class="roster-check">✓</span></div>
+                <div class="roster-person"><span class="roster-avatar avatar-two">BA</span><span><strong>Belayneh Abebe</strong><small>Joined this week</small></span><span class="roster-check">✓</span></div>
+                <div class="roster-person"><span class="roster-avatar avatar-three">NM</span><span><strong>Natnael Mengistu</strong><small>Joined last week</small></span><span class="roster-check">✓</span></div>
                 <div class="roster-invite">CLASS CODE <strong>BC · 24 · QX</strong><span>Copy code ↗</span></div>
               </div>
             </div>
@@ -365,7 +446,7 @@
               <div class="submission-paper">
                 <span class="visual-eyebrow">ASSIGNMENT INBOX</span><strong class="paper-heading">Cell report</strong>
                 <div class="submission-progress"><span>CLASS PROGRESS</span><strong>14 <small>/ 18 turned in</small></strong><div><i></i></div></div>
-                <div class="submission-file"><span class="file-icon">PDF</span><span><strong>cell_report_final.pdf</strong><small>Alex Morgan · Just now</small></span><span class="file-arrow">↗</span></div>
+                <div class="submission-file"><span class="file-icon">PDF</span><span><strong>cell_report_final.pdf</strong><small>Dagim Temesgen · Just now</small></span><span class="file-arrow">↗</span></div>
                 <div class="submission-feedback"><span class="feedback-star">✦</span><span><strong>18 <small>/ 20 points</small></strong><small>“Clear, thoughtful explanation.”</small></span><span class="feedback-check">✓</span></div>
               </div>
             </div>
@@ -418,7 +499,7 @@
 
   function renderAuthForm() {
     const isRegister = state.authMode === "register";
-    return '<div class="auth-layout"><aside class="auth-side"><a class="brand auth-brand" href="#" data-action="show-landing">' + brandMark() +
+    return '<div class="auth-layout' + (isRegister ? " auth-register-layout" : "") + '"><aside class="auth-side"><a class="brand auth-brand" href="#" data-action="show-landing">' + brandMark() +
       '<span>classroom<span class="brand-period">.</span></span></a><div class="auth-side-copy"><span class="auth-side-spark">✦</span>' +
       '<h2>A little progress<br />every day.</h2><p>Your classroom is ready when you are.</p></div><div class="auth-side-bottom">Learn together. Grow together.</div></aside>' +
       '<main class="auth-main"><button class="auth-back" type="button" data-action="show-landing">← <span>Back to home</span></button>' +
@@ -426,12 +507,22 @@
       '</p><h1>' + (isRegister ? "Create your account" : "Welcome back") + '</h1><p class="auth-subtitle">' +
       (isRegister ? "Choose your role to get started with your classroom." : "Sign in to pick up where you left off.") + '</p>' +
       '<form data-auth-form data-mode="' + (isRegister ? "register" : "login") + '">' +
-      (isRegister ? '<div class="form-field"><label for="auth-name">Your name</label><input id="auth-name" name="name" type="text" autocomplete="name" minlength="2" maxlength="80" required placeholder="e.g. Jamie Lee" /></div>' : "") +
+      (isRegister ? '<div class="form-field"><label for="auth-first-name">First name</label><input id="auth-first-name" name="firstName" type="text" autocomplete="given-name" maxlength="40" required placeholder="e.g. Dagim" /></div>' +
+        '<div class="form-field"><label for="auth-last-name">Last name</label><input id="auth-last-name" name="lastName" type="text" autocomplete="family-name" maxlength="40" required placeholder="e.g. Temesgen" /></div>' +
+        '<div class="form-field"><label for="auth-username">Username</label><input id="auth-username" name="username" type="text" autocomplete="username" minlength="3" maxlength="24" pattern="[A-Za-z0-9][A-Za-z0-9._-]{2,23}" required placeholder="Choose a username" />' +
+        '<span class="field-hint">3–24 letters, numbers, periods, underscores, or hyphens.</span></div>' : "") +
       (isRegister ? '<div class="form-field"><label for="auth-email">Email address</label><input id="auth-email" name="email" type="email" autocomplete="email" maxlength="254" required placeholder="you@example.com" /></div>' :
-        '<div class="form-field"><label for="auth-account-id">Classroom ID</label><input id="auth-account-id" name="accountId" type="text" autocomplete="username" maxlength="8" required placeholder="e.g. AA-45-BC" /></div>') +
-      '<div class="form-field"><label for="auth-password">Password</label><input id="auth-password" name="password" type="password" autocomplete="' + (isRegister ? "new-password" : "current-password") +
-      '" minlength="' + (isRegister ? "10" : "1") + '" maxlength="200" required placeholder="' + (isRegister ? "At least 10 characters" : "Enter your password") + '" /></div>' +
-      (isRegister ? '<fieldset class="role-options"><legend>I’m joining as a...</legend><label class="role-option"><input type="radio" name="role" value="teacher" checked /><span class="role-option-icon">✎</span><span><strong>Teacher</strong><small>Create classes and assignments</small></span><span class="radio-dot"></span></label>' +
+        '<div class="form-field"><label for="auth-username">Username</label><input id="auth-username" name="username" type="text" autocomplete="username" maxlength="24" required placeholder="Enter your username" /></div>') +
+      '<div class="form-field"><label for="auth-password">Password</label><div class="password-input-wrap"><input id="auth-password" name="password" type="password" autocomplete="' + (isRegister ? "new-password" : "current-password") +
+      (isRegister ? '" minlength="8" maxlength="200" pattern="(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[^A-Za-z0-9]).{8,200}" required placeholder="At least 8 characters" />' :
+        '" maxlength="200" required placeholder="Enter your password" />') + passwordVisibilityToggle("auth-password") + '</div>' +
+      (isRegister ? '<span class="field-hint">Include an uppercase and lowercase letter, a number, and a symbol.</span>' :
+        '<button class="password-hint-button" type="button" data-action="toggle-password-hint" data-hint-visible="false" aria-expanded="false">Show password hint</button>' +
+        '<p id="auth-password-hint" class="password-hint-message field-hint" aria-live="polite" hidden></p>') + '</div>' +
+      (isRegister ? '<div class="form-field"><label for="auth-confirm-password">Confirm password</label><div class="password-input-wrap"><input id="auth-confirm-password" name="confirmPassword" type="password" autocomplete="new-password" minlength="8" maxlength="200" required placeholder="Enter your password again" />' +
+        passwordVisibilityToggle("auth-confirm-password") + '</div></div>' +
+        '<div class="form-field auth-password-hint-field"><label for="auth-password-hint-entry">Password hint <span class="optional-note">optional</span></label><input id="auth-password-hint-entry" name="passwordHint" type="text" maxlength="120" autocomplete="off" placeholder="A clue to help you remember" /></div>' : "") +
+      (isRegister ? '<fieldset class="role-options"><legend>I’m joining as a...</legend><label class="role-option"><input type="radio" name="role" value="teacher" required /><span class="role-option-icon">✎</span><span><strong>Teacher</strong><small>Create classes and assignments</small></span><span class="radio-dot"></span></label>' +
       '<label class="role-option"><input type="radio" name="role" value="student" /><span class="role-option-icon">▤</span><span><strong>Student</strong><small>Join a class and turn in work</small></span><span class="radio-dot"></span></label></fieldset>' : "") +
       '<button class="primary-button auth-submit" type="submit">' + (isRegister ? "Create account" : "Sign in") + ' <span aria-hidden="true">→</span></button></form>' +
       '<p class="auth-switch">' + (isRegister ? 'Already have an account? <button type="button" data-action="switch-auth" data-mode="login">Sign in</button>' :
@@ -439,21 +530,89 @@
       '<p class="auth-legal">By continuing, you agree to use Classroom respectfully.</p></main></div>';
   }
 
+  function passwordVisibilityToggle(inputId) {
+    return '<button class="password-visibility-toggle" type="button" data-action="toggle-password-visibility" aria-label="Show password" title="Show password" aria-pressed="false" aria-controls="' + inputId + '">' +
+      '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"></path>' +
+      '<circle cx="12" cy="12" r="3"></circle><line class="eye-slash" x1="3" y1="3" x2="21" y2="21"></line></svg></button>';
+  }
+
+  function togglePasswordVisibility(button) {
+    const input = document.getElementById(button.getAttribute("aria-controls"));
+    if (!input || input.tagName !== "INPUT") return;
+    const isVisible = input.type === "password";
+    const label = isVisible ? "Hide password" : "Show password";
+    input.type = isVisible ? "text" : "password";
+    button.setAttribute("aria-pressed", String(isVisible));
+    button.setAttribute("aria-label", label);
+    button.title = label;
+  }
+
+  async function togglePasswordHint(button) {
+    const form = button.closest("[data-auth-form]");
+    const usernameInput = form.elements.username;
+    const message = form.querySelector("#auth-password-hint");
+    if (button.dataset.hintVisible === "true") {
+      message.hidden = true;
+      button.dataset.hintVisible = "false";
+      button.setAttribute("aria-expanded", "false");
+      button.textContent = "Show password hint";
+      return;
+    }
+    if (!usernameInput.value.trim()) {
+      message.textContent = "Enter your username first.";
+      message.hidden = false;
+      usernameInput.focus();
+      return;
+    }
+    setButtonLoading(button, true);
+    try {
+      const result = await api("/api/auth/hint", {
+        method: "POST",
+        body: { username: usernameInput.value },
+      });
+      showPasswordHint(form, result.hint);
+    } catch (error) {
+      showToast(error.message, "error");
+    } finally {
+      setButtonLoading(button, false);
+    }
+  }
+
+  function showPasswordHint(form, hint) {
+    const message = form.querySelector("#auth-password-hint");
+    const button = form.querySelector('[data-action="toggle-password-hint"]');
+    if (!message || !button) return;
+    message.textContent = hint || "No password hint is saved for this username.";
+    message.hidden = false;
+    button.dataset.hintVisible = "true";
+    button.setAttribute("aria-expanded", "true");
+    button.textContent = "Hide password hint";
+  }
+
   async function handleAuth(form) {
     const submit = form.querySelector('[type="submit"]');
     const isRegister = form.dataset.mode === "register";
-    submit.disabled = true;
+    const formData = new FormData(form);
+    if (isRegister && formData.get("password") !== formData.get("confirmPassword")) {
+      form.elements.confirmPassword.setCustomValidity("Passwords do not match.");
+      form.elements.confirmPassword.reportValidity();
+      return;
+    }
+    setButtonLoading(submit, true);
     try {
-      const formData = new FormData(form);
       const body = {
         password: formData.get("password"),
       };
       if (isRegister) {
-        body.name = formData.get("name");
+        body.firstName = formData.get("firstName");
+        body.lastName = formData.get("lastName");
+        body.username = formData.get("username");
         body.email = formData.get("email");
+        body.passwordHint = formData.get("passwordHint");
+        body.confirmPassword = formData.get("confirmPassword");
         body.role = formData.get("role");
       } else {
-        body.accountId = formData.get("accountId");
+        body.username = formData.get("username");
       }
       const result = await api("/api/auth/" + form.dataset.mode, { method: "POST", body });
       state.user = result.user;
@@ -467,8 +626,9 @@
       }
     } catch (error) {
       showToast(error.message, "error");
+      if (error.hintUnlocked) showPasswordHint(form, error.passwordHint);
     } finally {
-      submit.disabled = false;
+      setButtonLoading(submit, false);
     }
   }
 
@@ -491,6 +651,7 @@
     } else {
       pageContent.innerHTML = renderStudentHome();
     }
+    observeScrollReveal(pageContent);
   }
 
   function updateChrome() {
@@ -579,15 +740,15 @@
 
   function renderClassroomDetail() {
     const detail = state.classroomDetail;
-    if (!detail) return '<div class="class-detail-loading">' + emptyState("Loading your class", "Getting the roster and classwork...") + '</div>';
+    if (!detail) return '<div class="class-detail-loading">' + emptyState("Loading your class", "Getting the class details...") + '</div>';
     const classroom = detail.classroom;
     const assignments = detail.assignments;
     const quizzes = detail.resources.filter(function (resource) { return resource.kind === "quiz"; });
     const materials = detail.resources.filter(function (resource) { return resource.kind === "material"; });
     const tabs = [
       ["overview", "Overview"],
-      ["students", "Students (" + detail.students.length + ")"],
-      ["classwork", "Classwork (" + (assignments.length + quizzes.length) + ")"],
+      ["students", (detail.isTeacher ? "Students (" : "Enrolled (") + detail.students.length + ")"],
+      ["classwork", "Assessment (" + (assignments.length + quizzes.length) + ")"],
       ["materials", "Materials (" + materials.length + ")"],
       ["groups", "Groups (" + detail.groups.length + ")"],
     ];
@@ -597,11 +758,12 @@
         escapeHtml(classroom.id) + '">＋ Quiz</button><button class="secondary-button" type="button" data-action="open-create-material" data-class-id="' +
         escapeHtml(classroom.id) + '">＋ Material</button></div>'
       : "";
-    return '<div class="class-detail-header"><button class="text-button" type="button" data-action="set-view" data-view="classes">← My classes</button>' +
-      '<div class="class-detail-title"><div class="class-banner ' + safeColor(classroom.color) + '"><small>' + escapeHtml(classroom.subject) +
-      '</small><strong>' + escapeHtml(classroom.name) + '</strong></div><div class="class-detail-summary"><span>Teacher: ' +
-      escapeHtml(classroom.teacherName || state.user.name) + '</span><span>' + detail.students.length + ' students</span>' +
-      '<span>' + assignments.length + ' assignments</span><span>' + quizzes.length + ' quizzes</span></div>' +
+    return '<div class="class-banner class-detail-banner ' + safeColor(classroom.color) + '"><small>' + escapeHtml(classroom.subject) +
+      '</small><strong>' + escapeHtml(classroom.name) + '</strong></div><div class="class-detail-header">' +
+      '<button class="text-button" type="button" data-action="set-view" data-view="classes">← My classes</button>' +
+      '<div class="class-detail-title"><div class="class-detail-summary"><span>Teacher: ' +
+      escapeHtml(classroom.teacherName || state.user.name) + '</span><span>' + detail.students.length + ' enrolled students</span>' +
+      '<span>' + assignments.length + ' assessments</span><span>' + quizzes.length + ' quizzes</span></div>' +
       (detail.isTeacher ? '<div class="class-join-code"><span>CLASS CODE</span><strong>' + escapeHtml(classroom.joinCode) +
         '</strong><button class="small-action" type="button" data-action="copy-code" data-code="' + escapeHtml(classroom.joinCode) + '">Copy</button></div>' : "") +
       teacherActions + '</div></div><nav class="class-detail-tabs" aria-label="Class sections">' +
@@ -613,17 +775,20 @@
 
   function renderClassroomTab(detail) {
     if (state.classroomTab === "students") {
-      return '<div class="section-heading"><div><h2>Student management</h2><p>Roster for ' + escapeHtml(detail.classroom.name) + '.</p></div></div>' +
+      return '<div class="section-heading"><div><h2>' + (detail.isTeacher ? "Student management" : "Enrolled students") +
+        '</h2><p>' + (detail.isTeacher ? "Manage the students enrolled in " : "Students enrolled in ") +
+        escapeHtml(detail.classroom.name) + '.</p></div></div>' +
         (detail.students.length ? renderStudentRoster({ id: detail.classroom.id, students: detail.students }) :
           emptyState("No students yet", "Share the class code so students can request to join."));
     }
     if (state.classroomTab === "classwork") return renderClassworkTab(detail);
     if (state.classroomTab === "materials") return renderMaterialsTab(detail);
     if (state.classroomTab === "groups") return renderGroupsTab(detail);
-    return '<div class="class-overview-grid"><article class="class-overview-card"><span class="eyebrow">ROSTER</span><strong>' +
+    return '<div class="class-overview-grid"><article class="class-overview-card"><span class="eyebrow">' +
+      (detail.isTeacher ? "ROSTER" : "ENROLLED") + '</span><strong>' +
       detail.students.length + '</strong><span>enrolled students</span><button class="text-button" type="button" data-action="class-tab" data-tab="students">Open student list →</button></article>' +
-      '<article class="class-overview-card"><span class="eyebrow">CLASSWORK</span><strong>' + detail.assignments.length +
-      '</strong><span>assignments posted</span><button class="text-button" type="button" data-action="class-tab" data-tab="classwork">View assignment history →</button></article>' +
+      '<article class="class-overview-card"><span class="eyebrow">ASSESSMENT</span><strong>' + detail.assignments.length +
+      '</strong><span>assignments posted</span><button class="text-button" type="button" data-action="class-tab" data-tab="classwork">View assessment history →</button></article>' +
       '<article class="class-overview-card"><span class="eyebrow">LEARNING</span><strong>' +
       detail.resources.filter(function (resource) { return resource.kind === "quiz"; }).length +
       '</strong><span>quizzes · ' + detail.resources.filter(function (resource) { return resource.kind === "material"; }).length +
@@ -634,7 +799,7 @@
   }
 
   function renderClassworkTab(detail) {
-    return '<div class="section-heading"><div><h2>Assignment history</h2><p>Posted work and submission progress for this class.</p></div>' +
+    return '<div class="section-heading"><div><h2>Assessment history</h2><p>Posted work and submission progress for this class.</p></div>' +
       (detail.isTeacher ? '<button class="primary-button" type="button" data-action="open-create-assignment" data-class-id="' +
         escapeHtml(detail.classroom.id) + '">＋ Create assignment</button>' : "") + '</div>' +
       renderClassworkList(detail, false);
@@ -670,7 +835,7 @@
         '</small></div>' + button + '</article>');
     });
     return rows.length ? '<div class="resource-list' + (compact ? " compact" : "") + '">' + rows.join("") + '</div>' :
-      emptyState("No classwork yet", "Assignments and quizzes posted by the teacher will appear here.");
+      emptyState("No assessments yet", "Assignments and quizzes posted by the teacher will appear here.");
   }
 
   function renderMaterialsTab(detail) {
@@ -691,17 +856,48 @@
     const membership = detail.groups.find(function (group) {
       return group.members.some(function (member) { return member.id === state.user.id; });
     });
+    const activeSetup = settings.groupCount !== null || settings.leaderIds.length > 0 ||
+      detail.groups.length > 0 || detail.groupRequests.length > 0;
+    const canGenerateRandom = settings.mode === "random" && settings.groupCount !== null &&
+      settings.groupCount >= Math.ceil(detail.students.length / settings.maxGroupSize) &&
+      settings.groupCount <= Math.floor(detail.students.length / settings.minGroupSize);
     const controls = detail.isTeacher
-      ? '<div class="group-controls"><div><strong>Group setup</strong><span>Groups of up to ' + settings.groupSize +
-        ' students · student-led groups ' + (settings.studentGroupsEnabled ? "enabled" : "disabled") + '</span></div><div class="group-control-actions">' +
-        '<button class="secondary-button" type="button" data-action="open-group-settings">Group settings</button>' +
-        '<button class="secondary-button" type="button" data-action="open-manual-groups">Assign manually</button>' +
-        '<button class="primary-button" type="button" data-action="create-random-groups">Random grouping</button></div></div>'
-      : settings.studentGroupsEnabled && settings.isGroupLeader && !membership
-        ? '<div class="group-controls"><div><strong>You are a group leader</strong><span>Create a group of up to ' + settings.groupSize + ' enrolled students.</span></div>' +
-          '<button class="primary-button" type="button" data-action="open-student-group">Create my group</button></div>'
-        : !detail.groups.length ? '<div class="group-controls"><div><strong>Group work</strong><span>Your teacher has not created groups yet.</span></div></div>' : "";
-    return controls + (detail.groups.length
+      ? '<div class="group-controls"><div><strong>Group setup</strong><span>' +
+        (settings.groupCount === null
+          ? "Choose group sizes and the number of groups."
+          : settings.groupCount + (settings.groupCount === 1 ? " group · " : " groups · ") +
+            settings.minGroupSize + "–" + settings.maxGroupSize + " students · " +
+            (settings.mode === "random" ? "Random grouping" : "Student-led grouping")) +
+        '</span></div><div class="group-control-actions"><button class="secondary-button" type="button" data-action="open-group-settings">Group settings</button>' +
+        (activeSetup ? '<button class="secondary-button destructive-action" type="button" data-action="clear-group-setup">Clear group setup</button>' : "") +
+        (settings.mode === "random" ? '<button class="primary-button" type="button" data-action="create-random-groups"' +
+          (canGenerateRandom ? "" : " disabled") + '>Generate random groups</button>' : "") +
+        '</div></div>'
+      : settings.mode === "student-led" && settings.isGroupLeader && !membership
+        ? detail.myGroupRequest
+          ? '<div class="group-controls"><div><strong>Group proposal submitted</strong><span>' +
+            escapeHtml(detail.myGroupRequest.name) + ' is waiting for teacher approval.</span></div></div>'
+          : '<div class="group-controls"><div><strong>You are a group leader</strong><span>Propose a group of ' +
+            settings.minGroupSize + '–' + settings.maxGroupSize + ' students, including yourself.</span></div>' +
+            '<button class="primary-button" type="button" data-action="open-student-group">Propose a group</button></div>'
+        : !detail.groups.length
+          ? '<div class="group-controls"><div><strong>Group work</strong><span>' +
+            (settings.mode === "student-led" ? "Your teacher will review group proposals." : "Your teacher has not created groups yet.") +
+            '</span></div></div>'
+          : "";
+    const requests = detail.isTeacher && detail.groupRequests.length
+      ? '<section class="group-requests"><div class="section-heading"><div><h2>Group proposals</h2><p>Review student-led groups before they are created.</p></div>' +
+        '<span class="group-request-count">' + detail.groupRequests.length + ' pending</span></div><div class="group-request-list">' +
+        detail.groupRequests.map(function (groupRequest) {
+          return '<article class="group-request-card"><div class="group-request-copy"><strong>' + escapeHtml(groupRequest.name) +
+            '</strong><span>Leader: ' + escapeHtml(groupRequest.leaderName) + ' · ' + groupRequest.members.length + ' members</span>' +
+            '<small>' + groupRequest.members.map(function (member) { return escapeHtml(member.name); }).join(", ") + '</small></div>' +
+            '<div class="group-request-actions"><button class="secondary-button" type="button" data-action="reject-group-request" data-request-id="' +
+            escapeHtml(groupRequest.id) + '">Reject</button><button class="primary-button" type="button" data-action="approve-group-request" data-request-id="' +
+            escapeHtml(groupRequest.id) + '">Approve</button></div></article>';
+        }).join("") + '</div></section>'
+      : "";
+    return controls + requests + (detail.groups.length
       ? '<div class="group-card-grid">' + detail.groups.map(function (group) {
         return '<article class="class-group-card"><div class="group-card-heading"><div><span class="eyebrow">CLASS GROUP</span><h3>' +
           escapeHtml(group.name) + '</h3></div><span class="group-member-count">' + group.members.length + ' members</span></div>' +
@@ -711,7 +907,11 @@
               escapeHtml(member.name) + (member.id === group.leaderId ? ' <small>Leader</small>' : "") + '</span></li>';
           }).join("") + '</ul></article>';
       }).join("") + '</div>'
-      : emptyState("No groups yet", "Create balanced groups at random or assign students to groups yourself."));
+      : !detail.isTeacher && detail.myGroupRequest
+        ? ""
+        : emptyState("No groups yet", detail.isTeacher
+          ? "Set the group rules, then generate groups or assign student leaders."
+          : "Groups will appear here after your teacher or group leader sets them up."));
   }
 
   function renderAssignments() {
@@ -892,7 +1092,7 @@
       });
     });
     if (!requests.length) return "";
-    return '<section class="join-requests-section"><div class="section-heading"><div><h2>Requests to join</h2><p>Approve students before they can see classwork.</p></div>' +
+    return '<section class="join-requests-section"><div class="section-heading"><div><h2>Requests to join</h2><p>Approve students before they can see class assessments.</p></div>' +
       '<span class="status-pill status-submitted">' + requests.length + ' waiting</span></div><div class="join-request-list">' +
       requests.map(function (item) {
         return '<article class="join-request-card"><span class="avatar avatar-orange">' + escapeHtml(getInitials(item.request.studentName)) +
@@ -922,17 +1122,23 @@
       '<section class="settings-card"><div class="settings-card-heading"><div class="avatar ' +
       (state.user.role === "teacher" ? "avatar-green" : "avatar-plum") + '">' + escapeHtml(getInitials(state.user.name)) +
       '</div><div><h2>' + escapeHtml(state.user.name) + '</h2><p>' + (state.user.role === "teacher" ? "Teacher account" : "Student account") + '</p></div></div>' +
-      '<div class="account-id-card"><div><span>Your Classroom ID</span><strong>' + escapeHtml(state.user.id) +
-      '</strong><small>Use this ID and your password to sign in.</small></div><button class="secondary-button" type="button" data-action="copy-account-id" data-account-id="' +
+      '<div class="account-id-card"><div><span>Sign-in username</span><strong>' + escapeHtml(state.user.username) +
+      '</strong><small>Use this username and your password to sign in.</small></div></div>' +
+      '<div class="account-id-card"><div><span>Classroom account ID</span><strong>' + escapeHtml(state.user.id) +
+      '</strong><small>Your unique Classroom identifier.</small></div><button class="secondary-button" type="button" data-action="copy-account-id" data-account-id="' +
       escapeHtml(state.user.id) + '">Copy ID</button></div>' +
       '<form class="settings-form" data-profile-form><div class="form-field"><label for="profile-name">Full name</label><input id="profile-name" name="name" value="' +
-      escapeHtml(state.user.name) + '" minlength="2" maxlength="80" required /></div><div class="form-field"><label for="profile-email">Contact email</label>' +
+      escapeHtml(state.user.name) + '" minlength="2" maxlength="80" required /></div><div class="form-field"><label for="profile-username">Sign-in username</label>' +
+      '<input id="profile-username" name="username" value="' + escapeHtml(state.user.username) + '" minlength="3" maxlength="24" pattern="[A-Za-z0-9][A-Za-z0-9._-]{2,23}" required />' +
+      '<span class="field-hint">3–24 letters, numbers, periods, underscores, or hyphens.</span></div><div class="form-field"><label for="profile-email">Contact email</label>' +
       '<input id="profile-email" name="email" type="email" value="' + escapeHtml(state.user.email) + '" maxlength="254" required /></div>' +
       '<div class="settings-password-section"><h3>Change password</h3><p>Leave the new password blank to keep your current password.</p>' +
       '<div class="form-field"><label for="profile-current-password">Current password <span class="required-note">required to save changes</span></label>' +
-      '<input id="profile-current-password" name="currentPassword" type="password" autocomplete="current-password" maxlength="200" required /></div>' +
-      '<div class="form-field"><label for="profile-new-password">New password</label><input id="profile-new-password" name="newPassword" type="password" autocomplete="new-password" minlength="10" maxlength="200" placeholder="At least 10 characters" />' +
-      '<span class="field-hint">Only fill this in if you want to change your password.</span></div></div>' +
+      '<div class="password-input-wrap"><input id="profile-current-password" name="currentPassword" type="password" autocomplete="current-password" maxlength="200" required />' +
+      passwordVisibilityToggle("profile-current-password") + '</div></div>' +
+      '<div class="form-field"><label for="profile-new-password">New password</label><div class="password-input-wrap"><input id="profile-new-password" name="newPassword" type="password" autocomplete="new-password" minlength="8" maxlength="200" pattern="(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[^A-Za-z0-9]).{8,200}" />' +
+      passwordVisibilityToggle("profile-new-password") + '</div>' +
+      '<span class="field-hint">Use at least 8 characters with uppercase and lowercase letters, a number, and a symbol.</span></div></div>' +
       '<div class="settings-form-footer"><button class="primary-button" type="submit">Save changes</button></div></form></section>';
   }
 
@@ -1025,79 +1231,168 @@
     const detail = state.classroomDetail;
     if (!detail || !detail.isTeacher) return;
     const leaders = new Set(detail.groupSettings.leaderIds);
-    openModal("Group settings", "Set the target group size and, optionally, let assigned student leaders form groups.",
+    const settings = detail.groupSettings;
+    const countChoices = getGroupCountOptions(detail.students.length, settings.minGroupSize, settings.maxGroupSize);
+    const preferredCount = countChoices.includes(settings.groupCount) ? settings.groupCount : countChoices[0];
+    openModal("Group settings", "Set valid group sizes and choose one exact group count. Modes are mutually exclusive.",
       '<form class="modal-form" data-modal-form="group-settings" data-class-id="' + escapeHtml(detail.classroom.id) + '">' +
-      '<div class="form-field"><label for="group-size">Maximum students per group</label><input id="group-size" name="groupSize" type="number" min="2" max="20" value="' +
-      detail.groupSettings.groupSize + '" required /></div><label class="inline-check"><input name="studentGroupsEnabled" type="checkbox" value="true" ' +
-      (detail.groupSettings.studentGroupsEnabled ? "checked" : "") + ' />Allow teacher-assigned student leaders to create groups</label>' +
-      '<fieldset class="leader-options"><legend>Assign group leaders</legend>' +
+      '<div class="form-row"><div class="form-field"><label for="group-min-size">Minimum students</label><input id="group-min-size" class="group-setup-input" name="minGroupSize" type="number" min="4" max="12" value="' +
+      settings.minGroupSize + '" required /></div><div class="form-field"><label for="group-max-size">Maximum students</label><input id="group-max-size" class="group-setup-input" name="maxGroupSize" type="number" min="4" max="12" value="' +
+      settings.maxGroupSize + '" required /></div></div>' +
+      '<div class="form-field"><label for="group-count">Number of groups</label><select id="group-count" class="group-setup-input" name="groupCount">' +
+      (countChoices.length ? countChoices.map(function (count) {
+        return '<option value="' + count + '"' + (count === preferredCount ? " selected" : "") + '>' + count + (count === 1 ? " group" : " groups") + '</option>';
+      }).join("") : '<option value="">No valid group count</option>') + '</select>' +
+      '<span class="field-hint" data-group-count-hint></span></div>' +
+      '<div class="form-field"><label for="group-mode">Grouping mode</label><select id="group-mode" class="group-setup-input" name="mode">' +
+      '<option value="random"' + selected(settings.mode, "random") + '>Random grouping</option>' +
+      '<option value="student-led"' + selected(settings.mode, "student-led") + '>Student-led proposals</option></select></div>' +
+      '<fieldset class="leader-options" data-group-leaders><legend>Assign one leader per group</legend>' +
       (detail.students.length ? detail.students.map(function (student) {
-        return '<label><input type="checkbox" name="leaderIds" value="' + escapeHtml(student.id) + '"' +
+        return '<label><input class="group-setup-input group-leader-checkbox" type="checkbox" name="leaderIds" value="' + escapeHtml(student.id) + '"' +
           (leaders.has(student.id) ? " checked" : "") + ' /><span>' + escapeHtml(student.name) + '</span></label>';
       }).join("") : '<p class="field-hint">Students must join the class before you can assign group leaders.</p>') + '</fieldset>' +
+      '<p class="field-hint" data-leader-count-hint></p><p class="field-hint">Clear the current setup before changing modes after groups or leaders have been assigned.</p>' +
       modalFooter("Save group settings") + '</form>');
+    updateGroupSetupForm(modalRoot.querySelector('[data-modal-form="group-settings"]'));
   }
 
-  function openManualGroupsModal() {
-    const detail = state.classroomDetail;
-    if (!detail || detail.students.length < 2) {
-      showToast("At least two students are needed to create groups.", "error");
-      return;
-    }
-    const maxGroups = Math.floor(detail.students.length / 2);
-    const defaultGroups = Math.min(4, maxGroups);
-    const groupOptions = Array.from({ length: maxGroups }, function (_unused, index) {
-      return '<option value="' + (index + 1) + '"' + selected(defaultGroups, index + 1) + '>' + (index + 1) + ' groups</option>';
-    }).join("");
-    const studentRows = detail.students.map(function (student) {
-      const options = Array.from({ length: maxGroups }, function (_unused, index) {
-        return '<option value="' + (index + 1) + '">Group ' + (index + 1) + '</option>';
-      }).join("");
-      return '<label class="manual-group-student"><span>' + escapeHtml(student.name) + '</span><select name="group-' +
-        escapeHtml(student.id) + '">' + options + '</select></label>';
-    }).join("");
-    openModal("Assign groups manually", "Choose a group for each student. Every group must contain at least two students.",
-      '<form class="modal-form" data-modal-form="manual-groups" data-class-id="' + escapeHtml(detail.classroom.id) + '">' +
-      '<div class="form-field"><label for="manual-group-count">Number of groups</label><select id="manual-group-count" name="groupCount">' + groupOptions +
-      '</select></div><div class="manual-group-list">' + studentRows + '</div>' + modalFooter("Save groups") + '</form>');
+  function getGroupCountOptions(studentCount, minGroupSize, maxGroupSize) {
+    if (!Number.isInteger(studentCount) || !Number.isInteger(minGroupSize) ||
+        !Number.isInteger(maxGroupSize) || minGroupSize < 4 || maxGroupSize < minGroupSize ||
+        maxGroupSize > 12 || studentCount < minGroupSize) return [];
+    const minimum = Math.ceil(studentCount / maxGroupSize);
+    const maximum = Math.floor(studentCount / minGroupSize);
+    return Array.from({ length: Math.max(0, maximum - minimum + 1) }, function (_unused, index) {
+      return minimum + index;
+    });
+  }
+
+  function updateGroupSetupForm(form) {
+    if (!form) return;
+    const minSize = Number(form.elements.minGroupSize.value);
+    const maxSize = Number(form.elements.maxGroupSize.value);
+    const countSelect = form.elements.groupCount;
+    const currentCount = Number(countSelect.value);
+    const choices = getGroupCountOptions(state.classroomDetail.students.length, minSize, maxSize);
+    const selectedCount = choices.includes(currentCount) ? currentCount : choices[0];
+    countSelect.innerHTML = choices.length
+      ? choices.map(function (count) {
+        return '<option value="' + count + '"' + (count === selectedCount ? " selected" : "") + '>' +
+          count + (count === 1 ? " group" : " groups") + '</option>';
+      }).join("")
+      : '<option value="">No valid group count</option>';
+    countSelect.disabled = choices.length === 0;
+    form.querySelector("[data-group-count-hint]").textContent = choices.length
+      ? "For " + state.classroomDetail.students.length + " enrolled students, choose " +
+        choices[0] + (choices.length > 1 ? "–" + choices[choices.length - 1] : "") + " groups."
+      : "The class needs at least " + minSize + " enrolled students for this size range.";
+    const mode = form.elements.mode.value;
+    const leaderFieldset = form.querySelector("[data-group-leaders]");
+    const checkboxes = [...form.querySelectorAll(".group-leader-checkbox")];
+    const selectedLeaders = checkboxes.filter(function (checkbox) { return checkbox.checked; }).length;
+    const requiredLeaders = Number(countSelect.value) || 0;
+    leaderFieldset.hidden = mode !== "student-led";
+    checkboxes.forEach(function (checkbox) {
+      checkbox.disabled = mode !== "student-led" || (!checkbox.checked && selectedLeaders >= requiredLeaders);
+    });
+    form.querySelector("[data-leader-count-hint]").textContent = mode === "student-led"
+      ? selectedLeaders + " of " + requiredLeaders + " leaders selected."
+      : "Random grouping does not use assigned leaders.";
+    form.querySelector('[type="submit"]').disabled = choices.length === 0;
+  }
+
+  function updateStudentGroupSelection(form) {
+    if (!form) return;
+    const selectedMembers = form.querySelectorAll(".student-group-member:checked").length;
+    const minimum = Number(form.dataset.minMembers);
+    const maximum = Number(form.dataset.maxMembers);
+    form.querySelectorAll(".student-group-member").forEach(function (checkbox) {
+      if (checkbox.disabled && !checkbox.checked) return;
+      checkbox.disabled = !checkbox.checked && selectedMembers >= maximum;
+    });
+    form.querySelector("[data-student-group-count]").textContent =
+      (selectedMembers + 1) + " students selected, including you. Choose " + minimum + "–" + maximum + " classmates.";
+    form.querySelector('[type="submit"]').disabled = selectedMembers < minimum || selectedMembers > maximum;
   }
 
   function openStudentGroupModal() {
     const detail = state.classroomDetail;
     if (!detail || !detail.groupSettings.isGroupLeader) return;
-    const assigned = new Set(detail.groups.flatMap(function (group) {
-      return group.members.map(function (member) { return member.id; });
-    }));
+    const settings = detail.groupSettings;
     const available = detail.students.filter(function (student) {
-      return student.id !== state.user.id && !assigned.has(student.id);
+      return student.id !== state.user.id && !student.groupUnavailable;
     });
-    openModal("Create your group", "Choose classmates for a group of up to " + detail.groupSettings.groupSize + " students.",
-      '<form class="modal-form" data-modal-form="student-group" data-class-id="' + escapeHtml(detail.classroom.id) + '">' +
+    if (detail.myGroupRequest || detail.groups.some(function (group) {
+      return group.members.some(function (member) { return member.id === state.user.id; });
+    })) {
+      showToast("You already have a group or a proposal awaiting approval.", "error");
+      return;
+    }
+    if (available.length < settings.minGroupSize - 1) {
+      showToast("There are not enough unselected classmates to make a group of " + settings.minGroupSize + ".", "error");
+      return;
+    }
+    openModal("Propose your group", "Your teacher must approve the proposal before the group is created.",
+      '<form class="modal-form" data-modal-form="student-group" data-class-id="' + escapeHtml(detail.classroom.id) +
+      '" data-min-members="' + (settings.minGroupSize - 1) + '" data-max-members="' + (settings.maxGroupSize - 1) + '">' +
       '<div class="form-field"><label for="student-group-name">Group name</label><input id="student-group-name" name="name" required minlength="2" maxlength="60" placeholder="e.g. Team 1" /></div>' +
       '<fieldset class="leader-options"><legend>Choose classmates</legend>' +
-      (available.length ? available.map(function (student) {
-        return '<label><input type="checkbox" name="memberIds" value="' + escapeHtml(student.id) + '" /><span>' +
-          escapeHtml(student.name) + '</span></label>';
-      }).join("") : '<p class="field-hint">No unassigned classmates are available right now.</p>') + '</fieldset>' +
-      '<p class="field-hint">You will be included as the group leader. Each student can join only one group.</p>' +
-      modalFooter("Create group") + '</form>');
+      detail.students.filter(function (student) { return student.id !== state.user.id; }).map(function (student) {
+        return '<label class="group-member-option"><input class="student-group-member" type="checkbox" name="memberIds" value="' +
+          escapeHtml(student.id) + '"' + (student.groupUnavailable ? " disabled" : "") + ' /><span>' + escapeHtml(student.name) +
+          '</span>' + (student.groupUnavailable ? '<small>Already selected</small>' : "") + '</label>';
+      }).join("") + '</fieldset><p class="field-hint" data-student-group-count></p>' +
+      '<p class="field-hint">You will be included as the group leader. Selected students are reserved until the teacher responds.</p>' +
+      modalFooter("Send for approval") + '</form>');
+    updateStudentGroupSelection(modalRoot.querySelector('[data-modal-form="student-group"]'));
   }
 
   async function createRandomGroups(button) {
     const detail = state.classroomDetail;
     if (!detail || !detail.isTeacher) return;
     if (!await confirmAction("Create random groups?", "This replaces the current groups with a balanced random assignment.", "Random grouping")) return;
-    button.disabled = true;
+    setButtonLoading(button, true);
     try {
       await api("/api/classrooms/" + encodeURIComponent(detail.classroom.id) + "/groups/random", {
         method: "POST",
-        body: { groupSize: detail.groupSettings.groupSize },
+        body: {},
       });
       await refreshClassroomDetail();
       showToast("Students have been distributed into balanced groups.");
     } catch (error) {
       showToast(error.message, "error");
-      button.disabled = false;
+      setButtonLoading(button, false);
+    }
+  }
+
+  async function clearGroupSetup(button) {
+    const detail = state.classroomDetail;
+    if (!detail || !detail.isTeacher) return;
+    if (!await confirmAction("Clear the group setup?", "This removes all groups, pending proposals, and assigned leaders.", "Clear setup")) return;
+    setButtonLoading(button, true);
+    try {
+      await api("/api/classrooms/" + encodeURIComponent(detail.classroom.id) + "/groups", { method: "DELETE" });
+      await refreshClassroomDetail();
+      showToast("The group setup was cleared.");
+    } catch (error) {
+      showToast(error.message, "error");
+      setButtonLoading(button, false);
+    }
+  }
+
+  async function decideGroupRequest(button, decision) {
+    const detail = state.classroomDetail;
+    if (!detail || !detail.isTeacher) return;
+    setButtonLoading(button, true);
+    try {
+      await api("/api/classrooms/" + encodeURIComponent(detail.classroom.id) + "/group-requests/" +
+        encodeURIComponent(button.dataset.requestId), { method: "PUT", body: { decision } });
+      await refreshClassroomDetail();
+      showToast(decision === "approve" ? "Group proposal approved." : "Group proposal rejected.");
+    } catch (error) {
+      showToast(error.message, "error");
+      setButtonLoading(button, false);
     }
   }
 
@@ -1187,7 +1482,8 @@
       questions + modalFooter("Submit quiz") + '</form>');
   }
 
-  async function reviewQuiz(resourceId) {
+  async function reviewQuiz(resourceId, button) {
+    setButtonLoading(button, true);
     try {
       const result = await api("/api/resources/" + encodeURIComponent(resourceId) + "/quiz-responses");
       const shortQuestions = result.questions.filter(function (question) { return question.type === "short_answer"; });
@@ -1214,6 +1510,8 @@
         '<div class="quiz-review-list">' + (responseRows || '<p class="field-hint">No students have submitted this quiz yet.</p>') + '</div>');
     } catch (error) {
       showToast(error.message, "error");
+    } finally {
+      setButtonLoading(button, false);
     }
   }
 
@@ -1240,7 +1538,7 @@
   }
 
   function openAccountIdModal(accountId) {
-    openModal("Your Classroom ID", "Save this ID. You’ll use it whenever you sign in.", '<div class="account-id-content">' +
+    openModal("Your Classroom ID", "Save this ID as your unique Classroom identifier. Sign in with your username.", '<div class="account-id-content">' +
       '<div class="account-id-display"><span>Your ID</span><strong>' + escapeHtml(accountId) + '</strong></div>' +
       '<button class="secondary-button account-id-copy" type="button" data-action="copy-account-id" data-account-id="' +
       escapeHtml(accountId) + '">Copy ID</button><footer class="modal-footer"><button class="primary-button" type="button" data-close-modal>Continue to Classroom</button></footer></div>');
@@ -1277,7 +1575,7 @@
     const type = form.dataset.modalForm;
     const formData = new FormData(form);
     const submit = form.querySelector('[type="submit"]');
-    submit.disabled = true;
+    setButtonLoading(submit, true);
     try {
       if (type === "create-class") {
         await api("/api/classrooms", {
@@ -1359,38 +1657,24 @@
         await api("/api/classrooms/" + encodeURIComponent(form.dataset.classId) + "/groups/settings", {
           method: "PUT",
           body: {
-            groupSize: Number(formData.get("groupSize")),
-            studentGroupsEnabled: formData.has("studentGroupsEnabled"),
+            minGroupSize: Number(formData.get("minGroupSize")),
+            maxGroupSize: Number(formData.get("maxGroupSize")),
+            groupCount: Number(formData.get("groupCount")),
+            mode: formData.get("mode"),
             leaderIds: formData.getAll("leaderIds"),
           },
         });
         closeModal();
         await refreshClassroomDetail();
         showToast("Group settings saved.");
-      } else if (type === "manual-groups") {
-        const groupCount = Number(formData.get("groupCount"));
-        const groups = Array.from({ length: groupCount }, function (_unused, index) {
-          return { name: "Group " + (index + 1), studentIds: [] };
-        });
-        state.classroomDetail.students.forEach(function (student) {
-          const groupNumber = Number(formData.get("group-" + student.id));
-          if (groupNumber >= 1 && groupNumber <= groupCount) groups[groupNumber - 1].studentIds.push(student.id);
-        });
-        await api("/api/classrooms/" + encodeURIComponent(form.dataset.classId) + "/groups/manual", {
-          method: "POST",
-          body: { groups },
-        });
-        closeModal();
-        await refreshClassroomDetail();
-        showToast("Student groups have been assigned.");
       } else if (type === "student-group") {
-        await api("/api/classrooms/" + encodeURIComponent(form.dataset.classId) + "/groups", {
+        await api("/api/classrooms/" + encodeURIComponent(form.dataset.classId) + "/group-requests", {
           method: "POST",
           body: { name: formData.get("name"), memberIds: formData.getAll("memberIds") },
         });
         closeModal();
         await refreshClassroomDetail();
-        showToast("Your group has been created.");
+        showToast("Your proposal was sent to the teacher for approval.");
       } else if (type === "quiz-response") {
         const answers = {};
         form.querySelectorAll('[name^="answer_"]').forEach(function (input) {
@@ -1420,14 +1704,14 @@
       }
     } catch (error) {
       showToast(error.message, "error");
-      submit.disabled = false;
+      setButtonLoading(submit, false);
     }
   }
 
   async function handleGrade(form) {
     const formData = new FormData(form);
     const submit = form.querySelector('[type="submit"]');
-    submit.disabled = true;
+    setButtonLoading(submit, true);
     try {
       await api("/api/submissions/" + encodeURIComponent(form.dataset.submissionId) + "/grade", {
         method: "PUT",
@@ -1438,7 +1722,7 @@
       showToast("Grade returned to the student.");
     } catch (error) {
       showToast(error.message, "error");
-      submit.disabled = false;
+      setButtonLoading(submit, false);
     }
   }
 
@@ -1449,7 +1733,7 @@
       if (key.startsWith("grade-")) grades[key.slice("grade-".length)] = Number(value);
     }
     const submit = form.querySelector('[type="submit"]');
-    submit.disabled = true;
+    setButtonLoading(submit, true);
     try {
       await api("/api/quiz-responses/" + encodeURIComponent(form.dataset.responseId) + "/grade", {
         method: "PUT",
@@ -1461,19 +1745,20 @@
       showToast("Quiz grade returned to the student.");
     } catch (error) {
       showToast(error.message, "error");
-      submit.disabled = false;
+      setButtonLoading(submit, false);
     }
   }
 
   async function handleProfileUpdate(form) {
     const formData = new FormData(form);
     const submit = form.querySelector('[type="submit"]');
-    submit.disabled = true;
+    setButtonLoading(submit, true);
     try {
       const result = await api("/api/auth/profile", {
         method: "PUT",
         body: {
           name: formData.get("name"),
+          username: formData.get("username"),
           email: formData.get("email"),
           currentPassword: formData.get("currentPassword"),
           newPassword: formData.get("newPassword"),
@@ -1486,7 +1771,7 @@
       showToast("Your profile has been updated.");
     } catch (error) {
       showToast(error.message, "error");
-      submit.disabled = false;
+      setButtonLoading(submit, false);
     }
   }
 
@@ -1514,7 +1799,7 @@
     const confirmation = confirmations[action];
     if (confirmation && !await confirmAction(confirmation.title, confirmation.message, confirmation.confirmLabel)) return;
 
-    button.disabled = true;
+    setButtonLoading(button, true);
     try {
       if (action === "approve-join" || action === "decline-join") {
         await api("/api/classrooms/" + encodeURIComponent(classId) + "/join-requests/" +
@@ -1540,7 +1825,7 @@
       showToast(messages[action]);
     } catch (error) {
       showToast(error.message, "error");
-      button.disabled = false;
+      setButtonLoading(button, false);
     }
   }
 

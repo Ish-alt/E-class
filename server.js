@@ -15,8 +15,10 @@ const COOKIE_NAME = "classroom_session";
 const SESSION_DAYS = 14;
 const MAX_BODY_BYTES = 256 * 1024;
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
-const accountIdPattern = /^[A-Z]{2}-\d{2}-[A-Z]{2}$/;
+const accountIdPattern = /^(TC|ST)-\d{2}-[A-Z]{2}$/;
+const usernamePattern = /^[a-z0-9][a-z0-9._-]{2,23}$/;
 const dataDirectory = process.env.DATA_DIRECTORY || path.join(__dirname, "data");
+const localStorageDirectory = path.join(dataDirectory, "classroom-files");
 const postgresConnectionString = process.env.DATABASE_URL;
 const storageUrl = process.env.SUPABASE_URL ? process.env.SUPABASE_URL.replace(/\/+$/, "") : "";
 const storageServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
@@ -53,6 +55,8 @@ const upload = multer({
 });
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const rateBuckets = new Map();
+const loginFailureBuckets = new Map();
+const passwordHintBuckets = new Map();
 const fixedWindowLimiter = createRateLimiter();
 
 app.disable("x-powered-by");
@@ -79,15 +83,29 @@ app.get("/api/health", function (_request, response) {
 
 app.post("/api/auth/register", async function (request, response, next) {
   try {
-    const name = cleanText(request.body.name, 80);
+    const firstName = cleanText(request.body.firstName, 40);
+    const lastName = cleanText(request.body.lastName, 40);
+    const name = [firstName, lastName].filter(Boolean).join(" ");
+    const username = cleanText(request.body.username, 24).toLowerCase();
     const email = cleanText(request.body.email, 254).toLowerCase();
     const password = typeof request.body.password === "string" ? request.body.password : "";
+    const confirmPassword = typeof request.body.confirmPassword === "string" ? request.body.confirmPassword : "";
+    const passwordHint = cleanText(request.body.passwordHint, 120);
     const role = request.body.role;
 
-    if (name.length < 2) throw httpError(400, "Enter your name (at least 2 characters).");
+    if (!firstName || !lastName) throw httpError(400, "Enter both your first and last name.");
+    if (!usernamePattern.test(username)) {
+      throw httpError(400, "Username must be 3–24 characters and use letters, numbers, periods, underscores, or hyphens.");
+    }
     if (!emailPattern.test(email)) throw httpError(400, "Enter a valid email address.");
-    if (password.length < 10 || password.length > 200) throw httpError(400, "Password must be between 10 and 200 characters.");
+    if (!isStrongPassword(password)) {
+      throw httpError(400, "Password must be at least 8 characters and include an uppercase letter, a lowercase letter, a number, and a symbol.");
+    }
+    if (password !== confirmPassword) throw httpError(400, "Passwords do not match.");
     if (role !== "teacher" && role !== "student") throw httpError(400, "Choose teacher or student.");
+    if (await database.prepare("SELECT id FROM users WHERE LOWER(username) = ?").get(username)) {
+      throw httpError(409, "That username is already taken.");
+    }
     if (await database.prepare("SELECT id FROM users WHERE email = ?").get(email)) {
       throw httpError(409, "An account with that email already exists.");
     }
@@ -95,21 +113,25 @@ app.post("/api/auth/register", async function (request, response, next) {
     const salt = crypto.randomBytes(16);
     const passwordHash = crypto.scryptSync(password, salt, 64);
     const user = {
-      id: await generateAccountId(async (id) => Boolean(await database.prepare("SELECT 1 FROM users WHERE id = ?").get(id))),
+      id: await generateAccountId(role, async (id) => Boolean(await database.prepare("SELECT 1 FROM users WHERE id = ?").get(id))),
       name,
+      username,
       email,
       role,
+      passwordHint,
       passwordSalt: salt.toString("hex"),
       passwordHash: passwordHash.toString("hex"),
       createdAt: new Date().toISOString(),
     };
     try {
       await database.prepare(`
-        INSERT INTO users (id, name, email, role, password_salt, password_hash, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(user.id, user.name, user.email, user.role, user.passwordSalt, user.passwordHash, user.createdAt);
+        INSERT INTO users (id, name, username, email, role, password_hint, password_salt, password_hash, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(user.id, user.name, user.username, user.email, user.role, user.passwordHint,
+        user.passwordSalt, user.passwordHash, user.createdAt);
     } catch (error) {
       if (isEmailUniqueViolation(error)) throw httpError(409, "An account with that email already exists.");
+      if (isUsernameUniqueViolation(error)) throw httpError(409, "That username is already taken.");
       throw error;
     }
     await createSession(response, user.id);
@@ -119,14 +141,38 @@ app.post("/api/auth/register", async function (request, response, next) {
   }
 });
 
+app.post("/api/auth/hint", async function (request, response, next) {
+  try {
+    const username = cleanText(request.body.username, 24).toLowerCase();
+    if (!usernamePattern.test(username)) throw httpError(400, "Enter a valid username first.");
+    const key = request.ip + ":" + username;
+    if (incrementTimedBucket(passwordHintBuckets, key) > 5) {
+      response.status(429).json({ error: "Too many hint requests. Please try again later." });
+      return;
+    }
+    const user = await database.prepare("SELECT password_hint FROM users WHERE username = ?").get(username);
+    response.json({ hint: user ? user.password_hint : null });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post("/api/auth/login", async function (request, response, next) {
   try {
-    const accountId = cleanText(request.body.accountId, 8).toUpperCase();
+    const username = cleanText(request.body.username, 24).toLowerCase();
     const password = typeof request.body.password === "string" ? request.body.password : "";
-    const user = await database.prepare("SELECT * FROM users WHERE id = ?").get(accountId);
+    const user = usernamePattern.test(username)
+      ? await database.prepare("SELECT * FROM users WHERE username = ?").get(username)
+      : null;
     if (!user || !verifyPassword(password, user.password_salt, user.password_hash)) {
-      throw httpError(401, "Classroom ID or password is incorrect.");
+      const failures = incrementTimedBucket(loginFailureBuckets, request.ip + ":" + username);
+      response.status(401).json({
+        error: "Username or password is incorrect.",
+        ...(failures > 3 ? { hintUnlocked: true, passwordHint: user ? user.password_hint : null } : {}),
+      });
+      return;
     }
+    loginFailureBuckets.delete(request.ip + ":" + username);
     await createSession(response, user.id);
     response.json({ user: publicUser(user) });
   } catch (error) {
@@ -156,31 +202,40 @@ app.get("/api/auth/me", async function (request, response) {
 app.put("/api/auth/profile", requireUser, async function (request, response, next) {
   try {
     const name = cleanText(request.body.name, 80);
+    const username = cleanText(request.body.username, 24).toLowerCase();
     const email = cleanText(request.body.email, 254).toLowerCase();
     const currentPassword = typeof request.body.currentPassword === "string" ? request.body.currentPassword : "";
     const newPassword = typeof request.body.newPassword === "string" ? request.body.newPassword : "";
     if (name.length < 2) throw httpError(400, "Enter your name (at least 2 characters).");
+    if (!usernamePattern.test(username)) {
+      throw httpError(400, "Username must be 3–24 characters and use letters, numbers, periods, underscores, or hyphens.");
+    }
     if (!emailPattern.test(email)) throw httpError(400, "Enter a valid email address.");
     if (!verifyPassword(currentPassword, request.user.password_salt, request.user.password_hash)) {
       throw httpError(401, "Your current password is incorrect.");
     }
-    if (newPassword && (newPassword.length < 10 || newPassword.length > 200)) {
-      throw httpError(400, "New password must be between 10 and 200 characters.");
+    if (newPassword && !isStrongPassword(newPassword)) {
+      throw httpError(400, "New password must be at least 8 characters and include an uppercase letter, a lowercase letter, a number, and a symbol.");
     }
     const emailOwner = await database.prepare("SELECT id FROM users WHERE email = ? AND id != ?").get(email, request.user.id);
     if (emailOwner) throw httpError(409, "That email address is already in use.");
+    const usernameOwner = await database.prepare("SELECT id FROM users WHERE LOWER(username) = ? AND id != ?")
+      .get(username, request.user.id);
+    if (usernameOwner) throw httpError(409, "That username is already taken.");
     try {
       if (newPassword) {
         const salt = crypto.randomBytes(16);
         const passwordHash = crypto.scryptSync(newPassword, salt, 64);
         await database.prepare(`
-          UPDATE users SET name = ?, email = ?, password_salt = ?, password_hash = ? WHERE id = ?
-        `).run(name, email, salt.toString("hex"), passwordHash.toString("hex"), request.user.id);
+          UPDATE users SET name = ?, username = ?, email = ?, password_salt = ?, password_hash = ? WHERE id = ?
+        `).run(name, username, email, salt.toString("hex"), passwordHash.toString("hex"), request.user.id);
       } else {
-        await database.prepare("UPDATE users SET name = ?, email = ? WHERE id = ?").run(name, email, request.user.id);
+        await database.prepare("UPDATE users SET name = ?, username = ?, email = ? WHERE id = ?")
+          .run(name, username, email, request.user.id);
       }
     } catch (error) {
       if (isEmailUniqueViolation(error)) throw httpError(409, "That email address is already in use.");
+      if (isUsernameUniqueViolation(error)) throw httpError(409, "That username is already taken.");
       throw error;
     }
     const updatedUser = await database.prepare("SELECT * FROM users WHERE id = ?").get(request.user.id);
@@ -397,12 +452,22 @@ app.get("/api/classrooms/:id/details", requireUser, async function (request, res
     const classroom = await getAuthorizedClassroom(request.params.id, request.user);
     if (!classroom) throw httpError(404, "Classroom not found.");
     const isTeacher = classroom.teacher_id === request.user.id;
-    const students = await database.prepare(`
+    const selectedStudents = isTeacher ? [] : await database.prepare(`
+      SELECT student_id AS studentId FROM class_group_members WHERE classroom_id = ?
+      UNION
+      SELECT student_id AS studentId FROM group_member_reservations WHERE classroom_id = ?
+      UNION
+      SELECT student_id AS studentId FROM classroom_group_leaders WHERE classroom_id = ? AND student_id != ?
+    `).all(classroom.id, classroom.id, classroom.id, request.user.id);
+    const selectedStudentIds = new Set(selectedStudents.map(function (student) { return student.studentId; }));
+    const students = (await database.prepare(`
       SELECT u.id, u.name, ${isTeacher ? "u.email," : ""} e.joined_at AS joinedAt
       FROM enrollments e JOIN users u ON u.id = e.student_id
       WHERE e.classroom_id = ?
       ORDER BY LOWER(u.name)
-    `).all(classroom.id);
+    `).all(classroom.id)).map(function (student) {
+      return { ...student, groupUnavailable: !isTeacher && selectedStudentIds.has(student.id) };
+    });
     const assignments = await database.prepare(`
       SELECT a.id, a.title, a.instructions, a.due_date AS dueDate, a.points, a.created_at AS createdAt,
              COALESCE(cfg.submission_mode, 'either') AS submissionMode,
@@ -473,15 +538,42 @@ app.get("/api/classrooms/:id/details", requireUser, async function (request, res
         FROM class_group_members gm JOIN users u ON u.id = gm.student_id
         WHERE gm.group_id = ? ORDER BY LOWER(u.name)
       `).all(group.id);
+      if (!isTeacher && !members.some(function (member) { return member.id === request.user.id; })) continue;
       groups.push({ ...group, members });
     }
     const settings = await database.prepare(`
-      SELECT group_size AS groupSize, student_groups_enabled AS studentGroupsEnabled
+      SELECT min_group_size AS minGroupSize, max_group_size AS maxGroupSize,
+             group_count AS groupCount, group_mode AS mode
       FROM classroom_group_settings WHERE classroom_id = ?
     `).get(classroom.id);
     const groupLeaders = await database.prepare(`
       SELECT student_id AS studentId FROM classroom_group_leaders WHERE classroom_id = ?
     `).all(classroom.id);
+    const groupRequests = [];
+    if (isTeacher) {
+      const requests = await database.prepare(`
+        SELECT r.id, r.name, r.leader_id AS leaderId, u.name AS leaderName, r.created_at AS createdAt
+        FROM class_group_requests r JOIN users u ON u.id = r.leader_id
+        WHERE r.classroom_id = ? AND r.status = 'pending'
+        ORDER BY r.created_at ASC
+      `).all(classroom.id);
+      for (const groupRequest of requests) {
+        const members = await database.prepare(`
+          SELECT u.id, u.name FROM group_member_reservations r
+          JOIN users u ON u.id = r.student_id
+          WHERE r.request_id = ? ORDER BY LOWER(u.name)
+        `).all(groupRequest.id);
+        groupRequests.push({ ...groupRequest, members });
+      }
+    }
+    const myGroupRequest = !isTeacher && groupLeaders.some(function (leader) {
+      return leader.studentId === request.user.id;
+    }) ? await database.prepare(`
+      SELECT id, name, created_at AS createdAt
+      FROM class_group_requests
+      WHERE classroom_id = ? AND leader_id = ? AND status = 'pending'
+      ORDER BY created_at DESC LIMIT 1
+    `).get(classroom.id, request.user.id) : null;
     response.json({
       classroom: serializeClassroom(classroom, students.length, isTeacher),
       isTeacher,
@@ -509,10 +601,14 @@ app.get("/api/classrooms/:id/details", requireUser, async function (request, res
       }),
       resources: resourceItems,
       groups,
+      groupRequests,
+      myGroupRequest,
       groupSettings: {
-        groupSize: settings ? Number(settings.groupSize) : 4,
-        studentGroupsEnabled: settings ? Boolean(settings.studentGroupsEnabled) : false,
-        leaderIds: groupLeaders.map(function (leader) { return leader.studentId; }),
+        minGroupSize: settings ? Number(settings.minGroupSize) : 4,
+        maxGroupSize: settings ? Number(settings.maxGroupSize) : 12,
+        groupCount: settings && settings.groupCount !== null ? Number(settings.groupCount) : null,
+        mode: settings ? settings.mode : "random",
+        leaderIds: isTeacher ? groupLeaders.map(function (leader) { return leader.studentId; }) : [],
         isGroupLeader: groupLeaders.some(function (leader) { return leader.studentId === request.user.id; }),
       },
     });
@@ -526,40 +622,90 @@ app.put("/api/classrooms/:id/groups/settings", requireUser, requireRole("teacher
     const classroom = await database.prepare("SELECT id FROM classrooms WHERE id = ? AND teacher_id = ?")
       .get(request.params.id, request.user.id);
     if (!classroom) throw httpError(404, "Classroom not found.");
-    const groupSize = Number(request.body.groupSize);
-    const studentGroupsEnabled = request.body.studentGroupsEnabled;
+    const minGroupSize = Number(request.body.minGroupSize);
+    const maxGroupSize = Number(request.body.maxGroupSize);
+    const groupCount = Number(request.body.groupCount);
+    const mode = request.body.mode;
     const leaderIds = request.body.leaderIds;
-    if (!Number.isInteger(groupSize) || groupSize < 2 || groupSize > 20) {
-      throw httpError(400, "Group size must be a whole number from 2 to 20.");
+    if (!Number.isInteger(minGroupSize) || minGroupSize < 4 || minGroupSize > 12 ||
+        !Number.isInteger(maxGroupSize) || maxGroupSize < minGroupSize || maxGroupSize > 12) {
+      throw httpError(400, "Choose minimum and maximum group sizes from 4 to 12.");
     }
-    if (typeof studentGroupsEnabled !== "boolean" || !Array.isArray(leaderIds)) {
-      throw httpError(400, "Choose whether students can form groups and assign their leaders.");
+    if (mode !== "random" && mode !== "student-led") {
+      throw httpError(400, "Choose random or student-led grouping.");
+    }
+    if (!Array.isArray(leaderIds)) {
+      throw httpError(400, "Choose the required group leaders.");
     }
     const uniqueLeaderIds = [...new Set(leaderIds)];
     if (uniqueLeaderIds.some(function (id) { return typeof id !== "string"; })) {
       throw httpError(400, "Choose valid student leaders.");
     }
-    if (studentGroupsEnabled && uniqueLeaderIds.length === 0) {
-      throw httpError(400, "Assign at least one student leader before enabling student-created groups.");
+    const students = await database.prepare("SELECT student_id AS id FROM enrollments WHERE classroom_id = ?")
+      .all(classroom.id);
+    if (students.length < minGroupSize) {
+      throw httpError(400, "The class needs at least " + minGroupSize + " enrolled students to create a group.");
+    }
+    const minimumGroupCount = Math.ceil(students.length / maxGroupSize);
+    const maximumGroupCount = Math.floor(students.length / minGroupSize);
+    if (minimumGroupCount > maximumGroupCount || !Number.isInteger(groupCount) ||
+        groupCount < minimumGroupCount || groupCount > maximumGroupCount) {
+      throw httpError(400, "Choose a group count that can fit every enrolled student within the selected size range.");
     }
     for (const leaderId of uniqueLeaderIds) {
       if (!await database.prepare("SELECT 1 FROM enrollments WHERE classroom_id = ? AND student_id = ?")
         .get(classroom.id, leaderId)) throw httpError(400, "A selected group leader is not enrolled in this class.");
     }
+    if (mode === "student-led" && uniqueLeaderIds.length !== groupCount) {
+      throw httpError(400, "Assign exactly one student leader for each group.");
+    }
+    if (mode === "random" && uniqueLeaderIds.length) {
+      throw httpError(400, "Random grouping and assigned student leaders cannot be used at the same time.");
+    }
+    const existing = await database.prepare(`
+      SELECT min_group_size AS minGroupSize, max_group_size AS maxGroupSize,
+             group_count AS groupCount, group_mode AS mode
+      FROM classroom_group_settings WHERE classroom_id = ?
+    `).get(classroom.id);
+    const currentLeaders = await database.prepare("SELECT student_id AS studentId FROM classroom_group_leaders WHERE classroom_id = ?")
+      .all(classroom.id);
+    const existingGroups = await database.prepare("SELECT COUNT(*) AS count FROM class_groups WHERE classroom_id = ?")
+      .get(classroom.id);
+    const pendingRequests = await database.prepare(`
+      SELECT COUNT(*) AS count FROM class_group_requests WHERE classroom_id = ? AND status = 'pending'
+    `).get(classroom.id);
+    const leadersChanged = currentLeaders.length !== uniqueLeaderIds.length ||
+      currentLeaders.some(function (leader) { return !uniqueLeaderIds.includes(leader.studentId); });
+    const settingsChanged = !existing || Number(existing.minGroupSize) !== minGroupSize ||
+      Number(existing.maxGroupSize) !== maxGroupSize || Number(existing.groupCount) !== groupCount ||
+      existing.mode !== mode || leadersChanged;
+    if ((Number(existingGroups.count) || Number(pendingRequests.count)) && settingsChanged) {
+      throw httpError(409, "Clear current groups and pending requests before changing the group setup.");
+    }
+    if (existing && existing.mode !== mode && currentLeaders.length) {
+      throw httpError(409, "Clear assigned group leaders before switching to random grouping.");
+    }
     await database.transaction(async function (transaction) {
       await transaction.prepare(`
-        INSERT INTO classroom_group_settings (classroom_id, group_size, student_groups_enabled)
-        VALUES (?, ?, ?)
+        INSERT INTO classroom_group_settings
+          (classroom_id, group_size, student_groups_enabled, min_group_size, max_group_size, group_count, group_mode)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (classroom_id) DO UPDATE SET
-          group_size = excluded.group_size, student_groups_enabled = excluded.student_groups_enabled
-      `).run(classroom.id, groupSize, studentGroupsEnabled ? 1 : 0);
+          group_size = excluded.group_size,
+          student_groups_enabled = excluded.student_groups_enabled,
+          min_group_size = excluded.min_group_size,
+          max_group_size = excluded.max_group_size,
+          group_count = excluded.group_count,
+          group_mode = excluded.group_mode
+      `).run(classroom.id, maxGroupSize, mode === "student-led" ? 1 : 0,
+        minGroupSize, maxGroupSize, groupCount, mode);
       await transaction.prepare("DELETE FROM classroom_group_leaders WHERE classroom_id = ?").run(classroom.id);
       for (const leaderId of uniqueLeaderIds) {
         await transaction.prepare("INSERT INTO classroom_group_leaders (classroom_id, student_id) VALUES (?, ?)")
           .run(classroom.id, leaderId);
       }
     });
-    response.json({ groupSize, studentGroupsEnabled, leaderIds: uniqueLeaderIds });
+    response.json({ minGroupSize, maxGroupSize, groupCount, mode, leaderIds: uniqueLeaderIds });
   } catch (error) {
     next(error);
   }
@@ -570,15 +716,31 @@ app.post("/api/classrooms/:id/groups/random", requireUser, requireRole("teacher"
     const classroom = await database.prepare("SELECT id FROM classrooms WHERE id = ? AND teacher_id = ?")
       .get(request.params.id, request.user.id);
     if (!classroom) throw httpError(404, "Classroom not found.");
-    const groupSize = Number(request.body.groupSize);
-    if (!Number.isInteger(groupSize) || groupSize < 2 || groupSize > 20) {
-      throw httpError(400, "Group size must be a whole number from 2 to 20.");
+    const settings = await database.prepare(`
+      SELECT min_group_size AS minGroupSize, max_group_size AS maxGroupSize,
+             group_count AS groupCount, group_mode AS mode
+      FROM classroom_group_settings WHERE classroom_id = ?
+    `).get(classroom.id);
+    if (!settings || settings.mode !== "random" || settings.groupCount === null) {
+      throw httpError(409, "Configure random grouping and choose a valid group count first.");
+    }
+    const assignedLeaders = await database.prepare("SELECT COUNT(*) AS count FROM classroom_group_leaders WHERE classroom_id = ?")
+      .get(classroom.id);
+    if (Number(assignedLeaders.count)) {
+      throw httpError(409, "Remove assigned group leaders before using random grouping.");
     }
     const students = await database.prepare("SELECT student_id AS id FROM enrollments WHERE classroom_id = ?")
       .all(classroom.id);
-    if (students.length < 2) throw httpError(400, "At least two students are needed to create groups.");
+    if (students.length < Number(settings.minGroupSize)) {
+      throw httpError(409, "At least " + settings.minGroupSize + " enrolled students are required for these group settings.");
+    }
+    const groupCount = Number(settings.groupCount);
+    const minimumGroupCount = Math.ceil(students.length / Number(settings.maxGroupSize));
+    const maximumGroupCount = Math.floor(students.length / Number(settings.minGroupSize));
+    if (groupCount < minimumGroupCount || groupCount > maximumGroupCount) {
+      throw httpError(409, "The enrolled student count changed. Update the group count before generating groups.");
+    }
     shuffle(students);
-    const groupCount = Math.ceil(students.length / groupSize);
     const buckets = Array.from({ length: groupCount }, function () { return []; });
     students.forEach(function (student, index) { buckets[index % groupCount].push(student.id); });
     const groups = buckets.map(function (studentIds, index) {
@@ -591,82 +753,172 @@ app.post("/api/classrooms/:id/groups/random", requireUser, requireRole("teacher"
   }
 });
 
-app.post("/api/classrooms/:id/groups/manual", requireUser, requireRole("teacher"), async function (request, response, next) {
+app.delete("/api/classrooms/:id/groups", requireUser, requireRole("teacher"), async function (request, response, next) {
   try {
     const classroom = await database.prepare("SELECT id FROM classrooms WHERE id = ? AND teacher_id = ?")
       .get(request.params.id, request.user.id);
     if (!classroom) throw httpError(404, "Classroom not found.");
-    const students = await database.prepare("SELECT student_id AS id FROM enrollments WHERE classroom_id = ?")
-      .all(classroom.id);
-    const groups = request.body.groups;
-    if (!Array.isArray(groups) || groups.length < 1 || students.length < 2) {
-      throw httpError(400, "Add at least one group and two students.");
-    }
-    const assigned = new Set();
-    const validatedGroups = groups.map(function (group, index) {
-      if (!group || !Array.isArray(group.studentIds)) throw httpError(400, "Each group needs a student list.");
-      const name = cleanText(group.name, 60) || "Group " + (index + 1);
-      const studentIds = [...new Set(group.studentIds)];
-      if (studentIds.length < 2) throw httpError(400, "Each group must have at least two students.");
-      for (const studentId of studentIds) {
-        if (assigned.has(studentId) || !students.some(function (student) { return student.id === studentId; })) {
-          throw httpError(400, "Assign each enrolled student to exactly one group.");
-        }
-        assigned.add(studentId);
-      }
-      const leaderId = group.leaderId || null;
-      if (leaderId && !studentIds.includes(leaderId)) throw httpError(400, "A group leader must belong to that group.");
-      return { name, studentIds, leaderId };
+    await database.transaction(async function (transaction) {
+      await transaction.prepare("DELETE FROM class_group_requests WHERE classroom_id = ?").run(classroom.id);
+      await transaction.prepare("DELETE FROM group_member_reservations WHERE classroom_id = ?").run(classroom.id);
+      await transaction.prepare("DELETE FROM class_groups WHERE classroom_id = ?").run(classroom.id);
+      await transaction.prepare("DELETE FROM classroom_group_leaders WHERE classroom_id = ?").run(classroom.id);
+      await transaction.prepare(`
+        UPDATE classroom_group_settings
+        SET student_groups_enabled = 0, group_count = NULL, group_mode = 'random'
+        WHERE classroom_id = ?
+      `).run(classroom.id);
     });
-    if (assigned.size !== students.length) throw httpError(400, "Assign every enrolled student to a group.");
-    const createdGroups = await saveClassGroups(classroom.id, request.user.id, validatedGroups);
-    response.status(201).json({ groups: createdGroups });
+    response.status(204).end();
   } catch (error) {
     next(error);
   }
 });
 
-app.post("/api/classrooms/:id/groups", requireUser, requireRole("student"), async function (request, response, next) {
+app.post("/api/classrooms/:id/group-requests", requireUser, requireRole("student"), async function (request, response, next) {
   try {
     const classroom = await database.prepare("SELECT id FROM classrooms WHERE id = ?")
       .get(request.params.id);
     if (!classroom || !await database.prepare("SELECT 1 FROM enrollments WHERE classroom_id = ? AND student_id = ?")
       .get(classroom.id, request.user.id)) throw httpError(404, "Classroom not found.");
     const settings = await database.prepare(`
-      SELECT group_size AS groupSize, student_groups_enabled AS studentGroupsEnabled
+      SELECT min_group_size AS minGroupSize, max_group_size AS maxGroupSize,
+             group_count AS groupCount, group_mode AS mode
       FROM classroom_group_settings WHERE classroom_id = ?
     `).get(classroom.id);
-    if (!settings || !settings.studentGroupsEnabled) throw httpError(403, "The teacher has not enabled student-created groups.");
+    if (!settings || settings.mode !== "student-led" || settings.groupCount === null) {
+      throw httpError(403, "The teacher has not enabled student-led groups.");
+    }
     if (!await database.prepare("SELECT 1 FROM classroom_group_leaders WHERE classroom_id = ? AND student_id = ?")
       .get(classroom.id, request.user.id)) throw httpError(403, "Only a teacher-assigned group leader can create a group.");
     if (await database.prepare("SELECT 1 FROM class_group_members WHERE classroom_id = ? AND student_id = ?")
-      .get(classroom.id, request.user.id)) throw httpError(409, "You are already in a group.");
+      .get(classroom.id, request.user.id) ||
+        await database.prepare("SELECT 1 FROM class_group_requests WHERE classroom_id = ? AND leader_id = ? AND status = 'pending'")
+          .get(classroom.id, request.user.id)) throw httpError(409, "You already have a group or a request waiting for approval.");
     const name = cleanText(request.body.name, 60);
     const memberIds = Array.isArray(request.body.memberIds) ? [...new Set(request.body.memberIds)] : [];
     const studentIds = [...new Set([request.user.id, ...memberIds])];
     if (name.length < 2) throw httpError(400, "Enter a group name.");
-    if (studentIds.length < 2 || studentIds.length > Number(settings.groupSize)) {
-      throw httpError(400, "Choose between 2 and " + settings.groupSize + " students for the group.");
+    if (memberIds.some(function (id) { return typeof id !== "string"; }) ||
+        studentIds.length < Number(settings.minGroupSize) || studentIds.length > Number(settings.maxGroupSize)) {
+      throw httpError(400, "Choose a group with " + settings.minGroupSize + " to " + settings.maxGroupSize + " students, including yourself.");
     }
-    for (const studentId of studentIds) {
-      if (!await database.prepare("SELECT 1 FROM enrollments WHERE classroom_id = ? AND student_id = ?")
-        .get(classroom.id, studentId)) throw httpError(400, "Every group member must be enrolled in this class.");
-      if (await database.prepare("SELECT 1 FROM class_group_members WHERE classroom_id = ? AND student_id = ?")
-        .get(classroom.id, studentId)) throw httpError(409, "A selected student is already in a group.");
-    }
-    const group = { id: crypto.randomUUID(), classroomId: classroom.id, name, leaderId: request.user.id };
+    const requestId = crypto.randomUUID();
+    const createdAt = new Date().toISOString();
     await database.transaction(async function (transaction) {
+      const groupCounts = await transaction.prepare(`
+        SELECT
+          (SELECT COUNT(*) FROM class_groups WHERE classroom_id = ?) AS approvedGroups,
+          (SELECT COUNT(*) FROM class_group_requests WHERE classroom_id = ? AND status = 'pending') AS pendingGroups,
+          (SELECT COUNT(*) FROM class_group_members WHERE classroom_id = ?) AS assignedStudents,
+          (SELECT COUNT(*) FROM group_member_reservations WHERE classroom_id = ?) AS reservedStudents,
+          (SELECT COUNT(*) FROM enrollments WHERE classroom_id = ?) AS totalStudents
+      `).get(classroom.id, classroom.id, classroom.id, classroom.id, classroom.id);
+      const remainingGroups = Number(settings.groupCount) - Number(groupCounts.approvedGroups) -
+        Number(groupCounts.pendingGroups) - 1;
+      if (remainingGroups < 0) throw httpError(409, "All groups already have a leader request.");
+      for (const studentId of studentIds) {
+        if (!await transaction.prepare("SELECT 1 FROM enrollments WHERE classroom_id = ? AND student_id = ?")
+          .get(classroom.id, studentId)) throw httpError(400, "Every group member must be enrolled in this class.");
+        if (await transaction.prepare(`
+          SELECT 1 FROM class_group_members WHERE classroom_id = ? AND student_id = ?
+          UNION
+          SELECT 1 FROM group_member_reservations WHERE classroom_id = ? AND student_id = ?
+        `).get(classroom.id, studentId, classroom.id, studentId)) {
+          throw httpError(409, "A selected student is already selected for another group.");
+        }
+        if (studentId !== request.user.id && await transaction.prepare(`
+          SELECT 1 FROM classroom_group_leaders WHERE classroom_id = ? AND student_id = ?
+        `).get(classroom.id, studentId)) {
+          throw httpError(409, "A selected student is already assigned as another group's leader.");
+        }
+      }
+      const remainingStudents = Number(groupCounts.totalStudents) - Number(groupCounts.assignedStudents) -
+        Number(groupCounts.reservedStudents) - studentIds.length;
+      if (remainingStudents < remainingGroups * Number(settings.minGroupSize) ||
+          remainingStudents > remainingGroups * Number(settings.maxGroupSize)) {
+        throw httpError(400, "This group would leave too few or too many students for the remaining groups.");
+      }
       await transaction.prepare(`
-        INSERT INTO class_groups (id, classroom_id, name, created_by, leader_id, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run(group.id, group.classroomId, group.name, request.user.id, group.leaderId, new Date().toISOString());
+        INSERT INTO class_group_requests (id, classroom_id, leader_id, name, status, created_at)
+        VALUES (?, ?, ?, ?, 'pending', ?)
+      `).run(requestId, classroom.id, request.user.id, name, createdAt);
       for (const studentId of studentIds) {
         await transaction.prepare(`
-          INSERT INTO class_group_members (group_id, classroom_id, student_id, joined_at) VALUES (?, ?, ?, ?)
-        `).run(group.id, classroom.id, studentId, new Date().toISOString());
+          INSERT INTO group_member_reservations (classroom_id, student_id, request_id) VALUES (?, ?, ?)
+        `).run(classroom.id, studentId, requestId);
       }
     });
-    response.status(201).json({ group });
+    response.status(202).json({ request: { id: requestId, name, status: "pending", createdAt } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.put("/api/classrooms/:id/group-requests/:requestId", requireUser, requireRole("teacher"), async function (request, response, next) {
+  try {
+    const classroom = await database.prepare("SELECT id FROM classrooms WHERE id = ? AND teacher_id = ?")
+      .get(request.params.id, request.user.id);
+    if (!classroom) throw httpError(404, "Classroom not found.");
+    const decision = request.body.decision;
+    if (decision !== "approve" && decision !== "reject") throw httpError(400, "Choose approve or reject.");
+    const decidedAt = new Date().toISOString();
+    let status = decision === "approve" ? "approved" : "rejected";
+    await database.transaction(async function (transaction) {
+      const groupRequest = await transaction.prepare(`
+        SELECT id, leader_id AS leaderId, name
+        FROM class_group_requests
+        WHERE id = ? AND classroom_id = ? AND status = 'pending'
+      `).get(request.params.requestId, classroom.id);
+      if (!groupRequest) throw httpError(404, "Pending group request not found.");
+      if (decision === "approve") {
+        const settings = await transaction.prepare(`
+          SELECT min_group_size AS minGroupSize, max_group_size AS maxGroupSize, group_count AS groupCount,
+                 group_mode AS mode FROM classroom_group_settings WHERE classroom_id = ?
+        `).get(classroom.id);
+        const members = await transaction.prepare(`
+          SELECT student_id AS studentId FROM group_member_reservations WHERE request_id = ? ORDER BY student_id
+        `).all(groupRequest.id);
+        const groupCounts = await transaction.prepare(`
+          SELECT
+            (SELECT COUNT(*) FROM class_groups WHERE classroom_id = ?) AS approvedGroups,
+            (SELECT COUNT(*) FROM class_group_requests WHERE classroom_id = ? AND status = 'pending') AS pendingGroups,
+            (SELECT COUNT(*) FROM class_group_members WHERE classroom_id = ?) AS assignedStudents,
+            (SELECT COUNT(*) FROM group_member_reservations WHERE classroom_id = ?) AS reservedStudents,
+            (SELECT COUNT(*) FROM enrollments WHERE classroom_id = ?) AS totalStudents
+        `).get(classroom.id, classroom.id, classroom.id, classroom.id, classroom.id);
+        if (!settings || settings.mode !== "student-led" ||
+            Number(groupCounts.approvedGroups) >= Number(settings.groupCount)) {
+          throw httpError(409, "This group setup is no longer available.");
+        }
+        if (members.length < Number(settings.minGroupSize) || members.length > Number(settings.maxGroupSize) ||
+            !members.some(function (member) { return member.studentId === groupRequest.leaderId; })) {
+          throw httpError(409, "This request no longer meets the group rules. Reject it and ask the leader to try again.");
+        }
+        const remainingGroups = Number(settings.groupCount) - Number(groupCounts.approvedGroups) -
+          Number(groupCounts.pendingGroups);
+        const remainingStudents = Number(groupCounts.totalStudents) - Number(groupCounts.assignedStudents) -
+          Number(groupCounts.reservedStudents);
+        if (remainingStudents < remainingGroups * Number(settings.minGroupSize) ||
+            remainingStudents > remainingGroups * Number(settings.maxGroupSize)) {
+          throw httpError(409, "The class roster changed. Reject this proposal and update the group setup.");
+        }
+        const groupId = crypto.randomUUID();
+        await transaction.prepare(`
+          INSERT INTO class_groups (id, classroom_id, name, created_by, leader_id, created_at)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).run(groupId, classroom.id, groupRequest.name, request.user.id, groupRequest.leaderId, decidedAt);
+        for (const member of members) {
+          await transaction.prepare(`
+            INSERT INTO class_group_members (group_id, classroom_id, student_id, joined_at) VALUES (?, ?, ?, ?)
+          `).run(groupId, classroom.id, member.studentId, decidedAt);
+        }
+      }
+      await transaction.prepare("UPDATE class_group_requests SET status = ?, decided_at = ? WHERE id = ?")
+        .run(status, decidedAt, groupRequest.id);
+      await transaction.prepare("DELETE FROM group_member_reservations WHERE request_id = ?").run(groupRequest.id);
+    });
+    response.json({ status });
   } catch (error) {
     next(error);
   }
@@ -1172,9 +1424,15 @@ async function startServer() {
     await database.exec("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;");
   }
   await database.exec(schema);
+  await migrateAuthFields();
   await migrateUserIds();
+  await migrateGroupSettings();
   await database.prepare("DELETE FROM sessions WHERE expires_at <= ?").run(new Date().toISOString());
-  if (!storageUrl) console.warn("Supabase Storage is not configured; class file uploads are disabled.");
+  if (!storageUrl && !postgresConnectionString) {
+    console.warn("Using local file storage at " + localStorageDirectory + ".");
+  } else if (!storageUrl) {
+    console.warn("Supabase Storage is not configured; class file uploads are disabled.");
+  }
   app.listen(PORT, function () {
     console.log("Classroom is running at http://localhost:" + PORT);
   });
@@ -1354,17 +1612,109 @@ function verifyPassword(password, saltHex, storedHashHex) {
   return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
 }
 
+function isStrongPassword(password) {
+  return typeof password === "string" && password.length >= 8 && password.length <= 200 &&
+    /[a-z]/.test(password) && /[A-Z]/.test(password) && /\d/.test(password) && /[^A-Za-z0-9]/.test(password);
+}
+
 function publicUser(user) {
-  return { id: user.id, name: user.name, email: user.email, role: user.role };
+  return { id: user.id, name: user.name, username: user.username, email: user.email, role: user.role };
+}
+
+async function migrateAuthFields() {
+  const columns = database instanceof SQLiteDatabase
+    ? await database.prepare("PRAGMA table_info(users)").all()
+    : await database.prepare(`
+      SELECT column_name AS name FROM information_schema.columns
+      WHERE table_schema = current_schema() AND table_name = 'users'
+    `).all();
+  const existingColumns = new Set(columns.map((column) => column.name));
+  if (!existingColumns.has("username")) await database.exec("ALTER TABLE users ADD COLUMN username TEXT");
+  if (!existingColumns.has("password_hint")) await database.exec("ALTER TABLE users ADD COLUMN password_hint TEXT");
+
+  const users = await database.prepare("SELECT id, email, username FROM users ORDER BY id").all();
+  const usedUsernames = new Set();
+  for (const user of users) {
+    let username = cleanText(user.username, 24).toLowerCase();
+    if (!usernamePattern.test(username) || usedUsernames.has(username)) {
+      const emailName = cleanText(user.email, 254).split("@")[0].toLowerCase()
+        .replace(/[^a-z0-9._-]/g, "").slice(0, 20);
+      const base = /^[a-z0-9]/.test(emailName) && emailName.length >= 3 ? emailName : "user" + emailName;
+      username = base.slice(0, 24);
+      let suffix = 2;
+      while (usedUsernames.has(username)) {
+        const ending = "-" + suffix++;
+        username = base.slice(0, 24 - ending.length) + ending;
+      }
+    }
+    usedUsernames.add(username);
+    if (username !== user.username) {
+      await database.prepare("UPDATE users SET username = ? WHERE id = ?").run(username, user.id);
+    }
+  }
+  await database.exec("CREATE UNIQUE INDEX IF NOT EXISTS users_username_lower_unique ON users (LOWER(username))");
+}
+
+async function migrateGroupSettings() {
+  await database.prepare(`
+    UPDATE classroom_group_settings
+    SET group_size = CASE WHEN group_size < 4 THEN 4 WHEN group_size > 12 THEN 12 ELSE group_size END
+  `).run();
+  const columns = database instanceof SQLiteDatabase
+    ? await database.prepare("PRAGMA table_info(classroom_group_settings)").all()
+    : await database.prepare(`
+      SELECT column_name AS name FROM information_schema.columns
+      WHERE table_schema = current_schema() AND table_name = 'classroom_group_settings'
+    `).all();
+  const existingColumns = new Set(columns.map((column) => column.name));
+  if (!existingColumns.has("min_group_size")) {
+    await database.exec("ALTER TABLE classroom_group_settings ADD COLUMN min_group_size INTEGER NOT NULL DEFAULT 4");
+  }
+  if (!existingColumns.has("max_group_size")) {
+    await database.exec("ALTER TABLE classroom_group_settings ADD COLUMN max_group_size INTEGER NOT NULL DEFAULT 12");
+  }
+  if (!existingColumns.has("group_count")) {
+    await database.exec("ALTER TABLE classroom_group_settings ADD COLUMN group_count INTEGER");
+  }
+  if (!existingColumns.has("group_mode")) {
+    await database.exec("ALTER TABLE classroom_group_settings ADD COLUMN group_mode TEXT NOT NULL DEFAULT 'random'");
+  }
+  if (["min_group_size", "max_group_size", "group_count", "group_mode"]
+    .some((column) => !existingColumns.has(column))) {
+    const settings = await database.prepare(`
+      SELECT classroom_id AS classroomId, student_groups_enabled AS studentGroupsEnabled
+      FROM classroom_group_settings
+    `).all();
+    for (const setting of settings) {
+      const enrolled = await database.prepare("SELECT COUNT(*) AS count FROM enrollments WHERE classroom_id = ?")
+        .get(setting.classroomId);
+      const groupCount = await database.prepare("SELECT COUNT(*) AS count FROM class_groups WHERE classroom_id = ?")
+        .get(setting.classroomId);
+      const leaderCount = await database.prepare("SELECT COUNT(*) AS count FROM classroom_group_leaders WHERE classroom_id = ?")
+        .get(setting.classroomId);
+      const mode = setting.studentGroupsEnabled && Number(leaderCount.count) ? "student-led" : "random";
+      const migratedCount = Number(groupCount.count) || (mode === "student-led" ? Number(leaderCount.count) : 0);
+      const minimumGroups = Math.ceil(Number(enrolled.count) / 12);
+      const maximumGroups = Math.floor(Number(enrolled.count) / 4);
+      const validCount = Number(enrolled.count) >= 4 &&
+        migratedCount >= minimumGroups && migratedCount <= maximumGroups ? migratedCount : null;
+      await database.prepare(`
+        UPDATE classroom_group_settings
+        SET min_group_size = 4, max_group_size = 12, group_count = ?, group_mode = ?
+        WHERE classroom_id = ?
+      `).run(validCount, mode, setting.classroomId);
+    }
+  }
 }
 
 async function migrateUserIds() {
-  const users = await database.prepare("SELECT id FROM users").all();
+  const users = await database.prepare("SELECT id, role FROM users").all();
   const usedIds = new Set(users.map((user) => user.id));
   const replacements = [];
   for (const user of users) {
-    if (accountIdPattern.test(user.id)) continue;
-    const newId = await generateAccountId((id) => usedIds.has(id));
+    const prefix = user.role === "teacher" ? "TC" : "ST";
+    if (accountIdPattern.test(user.id) && user.id.startsWith(prefix + "-")) continue;
+    const newId = await generateAccountId(user.role, (id) => usedIds.has(id));
     usedIds.add(newId);
     replacements.push([user.id, newId]);
   }
@@ -1390,10 +1740,11 @@ async function migrateUserIds() {
   });
 }
 
-async function generateAccountId(isTaken) {
+async function generateAccountId(role, isTaken) {
   const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  const prefix = role === "teacher" ? "TC" : "ST";
   for (let attempt = 0; attempt < 100; attempt += 1) {
-    const id = randomLetters(letters, 2) + "-" +
+    const id = prefix + "-" +
       String(crypto.randomInt(100)).padStart(2, "0") + "-" + randomLetters(letters, 2);
     if (!await isTaken(id)) return id;
   }
@@ -1519,6 +1870,23 @@ function requireStorageConfigured() {
   return { storageUrl, storageServiceKey };
 }
 
+function usesLocalFileStorage() {
+  return !postgresConnectionString && !storageUrl && !storageServiceKey;
+}
+
+function localStoragePath(storagePath) {
+  const segments = String(storagePath || "").split("/");
+  if (!segments.length || segments.some(function (segment) {
+    return !segment || segment === "." || segment === ".." || !/^[a-zA-Z0-9._-]+$/.test(segment);
+  })) throw httpError(400, "Invalid stored file path.");
+  const resolvedPath = path.resolve(localStorageDirectory, ...segments);
+  const relativePath = path.relative(localStorageDirectory, resolvedPath);
+  if (!relativePath || relativePath.startsWith(".." + path.sep) || relativePath === ".." || path.isAbsolute(relativePath)) {
+    throw httpError(400, "Invalid stored file path.");
+  }
+  return resolvedPath;
+}
+
 async function storageRequest(pathname, options) {
   const config = requireStorageConfigured();
   let result;
@@ -1544,19 +1912,25 @@ async function storageRequest(pathname, options) {
 }
 
 async function uploadToStorage(file, directory) {
-  requireStorageConfigured();
   const extension = getFileExtension(file.originalname);
   const id = crypto.randomUUID();
   const storagePath = directory + "/" + id + "." + extension;
-  await storageRequest("object/" + encodeURIComponent(storageBucket) + "/" +
-    storagePath.split("/").map(encodeURIComponent).join("/"), {
-    method: "POST",
-    headers: {
-      "Content-Type": fileTypes[extension],
-      "x-upsert": "false",
-    },
-    body: file.buffer,
-  });
+  if (usesLocalFileStorage()) {
+    const destination = localStoragePath(storagePath);
+    await fs.promises.mkdir(path.dirname(destination), { recursive: true });
+    await fs.promises.writeFile(destination, file.buffer, { flag: "wx" });
+  } else {
+    requireStorageConfigured();
+    await storageRequest("object/" + encodeURIComponent(storageBucket) + "/" +
+      storagePath.split("/").map(encodeURIComponent).join("/"), {
+      method: "POST",
+      headers: {
+        "Content-Type": fileTypes[extension],
+        "x-upsert": "false",
+      },
+      body: file.buffer,
+    });
+  }
   return {
     originalName: cleanFileName(file.originalname),
     storagePath,
@@ -1566,6 +1940,14 @@ async function uploadToStorage(file, directory) {
 }
 
 async function downloadFromStorage(storagePath) {
+  if (usesLocalFileStorage()) {
+    try {
+      return await fs.promises.readFile(localStoragePath(storagePath));
+    } catch (error) {
+      if (error.code === "ENOENT") throw httpError(404, "File not found.");
+      throw error;
+    }
+  }
   const result = await storageRequest("object/" + encodeURIComponent(storageBucket) + "/" +
     storagePath.split("/").map(encodeURIComponent).join("/"), { method: "GET" });
   return Buffer.from(await result.arrayBuffer());
@@ -1573,6 +1955,16 @@ async function downloadFromStorage(storagePath) {
 
 async function removeFromStorage(storagePaths) {
   if (!storagePaths.length) return;
+  if (usesLocalFileStorage()) {
+    for (const storagePath of storagePaths) {
+      try {
+        await fs.promises.unlink(localStoragePath(storagePath));
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+    }
+    return;
+  }
   await storageRequest("object/" + encodeURIComponent(storageBucket), {
     method: "DELETE",
     headers: { "Content-Type": "application/json" },
@@ -1686,6 +2078,9 @@ function createRateLimiter() {
   setInterval(function () {
     const cutoff = Date.now() - 15 * 60 * 1000;
     for (const [key, bucket] of rateBuckets) if (bucket.startedAt < cutoff) rateBuckets.delete(key);
+    for (const buckets of [loginFailureBuckets, passwordHintBuckets]) {
+      for (const [key, bucket] of buckets) if (bucket.startedAt < cutoff) buckets.delete(key);
+    }
   }, 5 * 60 * 1000).unref();
   return function (request, response, next) {
     const key = request.ip + ":" + request.path;
@@ -1707,6 +2102,17 @@ function createRateLimiter() {
   };
 }
 
+function incrementTimedBucket(buckets, key) {
+  const now = Date.now();
+  let bucket = buckets.get(key);
+  if (!bucket || now - bucket.startedAt >= 15 * 60 * 1000) {
+    bucket = { startedAt: now, count: 0 };
+    buckets.set(key, bucket);
+  }
+  bucket.count += 1;
+  return bucket.count;
+}
+
 function httpError(status, message) {
   const error = new Error(message);
   error.status = status;
@@ -1716,6 +2122,11 @@ function httpError(status, message) {
 function isEmailUniqueViolation(error) {
   return error.code === "23505" && error.constraint === "users_email_key" ||
     String(error.message).includes("users.email");
+}
+
+function isUsernameUniqueViolation(error) {
+  return error.code === "23505" && /username/i.test(error.constraint || "") ||
+    /users_username|users\.username/i.test(String(error.message));
 }
 
 startServer().catch(function (error) {
